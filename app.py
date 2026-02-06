@@ -2,57 +2,106 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, time, timedelta
 from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 import time as time_module
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="Monitor Manovre TMT", layout="wide")
+st.set_page_config(page_title="Monitor Manovre Porto", layout="wide")
 
-# --- FUNZIONE SCRAPING CON SELENIUM ---
-def fetch_tmt_data_selenium():
-    url = "https://www.trieste-marine-terminal.com/it"
-    
-    # Opzioni per rendere il browser compatibile con l'ambiente server Linux
+# --- FUNZIONE SETUP BROWSER ---
+def get_driver():
     chrome_options = Options()
-    chrome_options.add_argument("--headless") # Esegue senza interfaccia grafica
+    chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    
+    service = Service("/usr/bin/chromedriver")
+    return webdriver.Chrome(service=service, options=chrome_options)
+
+# --- 1. SCRAPING TMT (Container) ---
+def fetch_tmt_data(driver):
+    url = "https://www.trieste-marine-terminal.com/it"
     try:
-        # Usiamo il driver di sistema installato via packages.txt
-        service = Service("/usr/bin/chromedriver")
-        
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        
         driver.get(url)
-        
-        # Aspettiamo 5 secondi che il sito carichi i dati
         time_module.sleep(5)
-        
-        # Leggiamo l'HTML completo
-        html_completo = driver.page_source
-        driver.quit()
-        
-        # Cerchiamo le tabelle nell'HTML completo
-        dfs = pd.read_html(html_completo, match="Vessel", flavor='html5lib')
-        
+        dfs = pd.read_html(driver.page_source, match="Vessel", flavor='html5lib')
         if len(dfs) > 0:
             df = dfs[0]
-            # Pulizia nomi colonne
             df.columns = [str(c).strip() for c in df.columns]
-            
-            # Conversione Date (formato dd-mm-yyyy HH:MM:SS)
             for col in ['ETB', 'ETD']:
                 if col in df.columns:
                     df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
+            df['Terminal'] = 'TMT (Molo VII)' # Aggiungiamo etichetta
+            return df
+    except Exception as e:
+        st.error(f"Errore TMT: {e}")
+    return pd.DataFrame()
+
+# --- 2. SCRAPING TASCO (Petroliere - SIOT) ---
+def fetch_tasco_data(driver):
+    # Verifica credenziali
+    if "tasco" not in st.secrets:
+        st.warning("⚠️ Credenziali TASCO non trovate nei Secrets. Configurale su Streamlit Cloud.")
+        return pd.DataFrame()
+
+    login_url = "https://tasco.tal-oil.com/ui/login"
+    target_url = "https://tasco.tal-oil.com/ui/menuitem-2003"
+    
+    try:
+        # FASE 1: LOGIN
+        driver.get(login_url)
+        time_module.sleep(3) # Attesa caricamento form
+        
+        # Cerchiamo i campi username e password (ipotesi standard id o name)
+        # Nota: Se fallisce qui, dovremo ispezionare l'HTML della pagina login
+        try:
+            user_input = driver.find_element(By.NAME, "username") # Proviamo name="username"
+            pass_input = driver.find_element(By.NAME, "password")
+        except:
+            # Fallback se usano ID diversi
+            user_input = driver.find_element(By.CSS_SELECTOR, "input[type='text']")
+            pass_input = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
+
+        user_input.send_keys(st.secrets["tasco"]["username"])
+        pass_input.send_keys(st.secrets["tasco"]["password"])
+        pass_input.send_keys(Keys.RETURN) # Preme Invio
+        
+        time_module.sleep(5) # Attesa post-login
+        
+        # FASE 2: NAVIGAZIONE ALLA TABELLA
+        driver.get(target_url)
+        time_module.sleep(5) # Attesa caricamento tabella
+        
+        # FASE 3: LETTURA DATI
+        # Cerchiamo tabella con colonna POB
+        dfs = pd.read_html(driver.page_source, match="POB", flavor='html5lib')
+        
+        if len(dfs) > 0:
+            df = dfs[0]
+            df.columns = [str(c).strip() for c in df.columns]
+            
+            # NORMALIZZAZIONE: Rinominiamo le colonne TASCO per farle uguali a TMT
+            # POB (Pilot on Board) -> ETB (Arrivo)
+            # TLB (Tug Line Break) -> ETD (Partenza)
+            rename_map = {'POB': 'ETB', 'TLB': 'ETD'}
+            df = df.rename(columns=rename_map)
+            
+            # Conversione Date
+            for col in ['ETB', 'ETD']:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
+            
+            df['Terminal'] = 'SIOT (Petroli)'
             return df
         else:
+            # st.warning("Login TASCO ok, ma nessuna tabella trovata.")
             return pd.DataFrame()
-
+            
     except Exception as e:
-        st.error(f"Errore Browser: {e}")
+        # st.error(f"Errore TASCO (verificare login): {e}")
         return pd.DataFrame()
 
 # --- LOGICA TURNI ---
@@ -79,53 +128,43 @@ def get_orari_turno(ora_riferimento, tipo_visualizzazione):
     else:
         return prossimo_start, prossimo_end, "Prossimo Turno"
 
-# --- FUNZIONE DI STILE (COLORI) ---
+# --- STILE E COLORI ---
 def style_manovre(row):
-    # Creiamo una lista di stili vuota lunga quanto le colonne
     styles = [''] * len(row.index)
-    
-    # Helper per trovare l'indice della colonna
     def set_style(col_name, css):
         try:
             idx = row.index.get_loc(col_name)
             styles[idx] = css
-        except KeyError:
-            pass # Se la colonna non c'è, ignora
+        except KeyError: pass
 
-    # Logica Colori
     if 'ARRIVO' in str(row['Tipo']):
-        # Colora la cella del TIPO (Verde chiaro)
         set_style('Tipo', 'background-color: #d4edda; color: black; font-weight: bold')
-        # Colora la cella ETB (Verde più scuro sul testo)
         set_style('ETB', 'background-color: #d4edda; color: #155724; font-weight: bold; border: 2px solid #155724')
         
     if 'PARTENZA' in str(row['Tipo']):
-        # Colora la cella del TIPO (Rosso chiaro)
         set_style('Tipo', 'background-color: #f8d7da; color: black; font-weight: bold')
-        # Colora la cella ETD (Rosso più scuro sul testo)
         set_style('ETD', 'background-color: #f8d7da; color: #721c24; font-weight: bold; border: 2px solid #721c24')
         
     return styles
 
-# --- INTERFACCIA ---
-st.title("⚓ Monitor Manovre TMT (Live)")
+# --- INTERFACCIA PRINCIPALE ---
+st.title("⚓ Monitor Manovre Porto di Trieste")
 
-# Sidebar Debug
+# Sidebar
 st.sidebar.header("🔧 Simulazione")
-ora_simulata = st.sidebar.time_input("Ora Simulazione", datetime.now().time())
-data_simulata = st.sidebar.date_input("Data Simulazione", datetime.now().date())
+ora_simulata = st.sidebar.time_input("Ora", datetime.now().time())
+data_simulata = st.sidebar.date_input("Data", datetime.now().date())
 dt_rif = datetime.combine(data_simulata, ora_simulata)
 
 col_btn, col_info, col_sel = st.columns([1, 2, 2])
 
 with col_btn:
-    if st.button("🔄 AGGIORNA DATI", type="primary"):
+    if st.button("🔄 AGGIORNA TUTTO", type="primary"):
         st.rerun()
 
 with col_sel:
     scelta_vista = st.radio("Filtra per:", ["Turno Attuale", "Prossimo Turno"], horizontal=True)
 
-# Calcolo orari
 start, end, nome_turno = get_orari_turno(dt_rif, scelta_vista)
 
 with col_info:
@@ -133,34 +172,53 @@ with col_info:
 
 st.divider()
 
-# Esecuzione
-with st.spinner("Scaricamento dati in corso..."):
-    df = fetch_tmt_data_selenium()
-
-if not df.empty:
-    # 1. Filtro Temporale
-    mask = ((df['ETB'] >= start) & (df['ETB'] <= end)) | ((df['ETD'] >= start) & (df['ETD'] <= end))
-    df_filtrato = df[mask].copy()
+# --- ESECUZIONE ---
+with st.spinner("Connessione ai terminal TMT e SIOT in corso..."):
+    driver = get_driver()
     
-    # 2. Creazione colonna "Azione"
+    # Peschiamo da entrambe le fonti
+    df_tmt = fetch_tmt_data(driver)
+    df_tasco = fetch_tasco_data(driver)
+    
+    driver.quit()
+
+    # Uniamo i dati (se presenti)
+    frames = []
+    if not df_tmt.empty: frames.append(df_tmt)
+    if not df_tasco.empty: frames.append(df_tasco)
+    
+    if frames:
+        df_total = pd.concat(frames, ignore_index=True)
+    else:
+        df_total = pd.DataFrame()
+
+# --- VISUALIZZAZIONE ---
+if not df_total.empty:
+    # 1. Filtro Temporale Unificato
+    mask = ((df_total['ETB'] >= start) & (df_total['ETB'] <= end)) | ((df_total['ETD'] >= start) & (df_total['ETD'] <= end))
+    df_filtrato = df_total[mask].copy()
+    
+    # 2. Logica Azione
     def get_azione(row):
         azioni = []
-        if start <= row['ETB'] <= end: azioni.append("ARRIVO")
-        if start <= row['ETD'] <= end: azioni.append("PARTENZA")
+        if pd.notnull(row['ETB']) and start <= row['ETB'] <= end: azioni.append("ARRIVO")
+        if pd.notnull(row['ETD']) and start <= row['ETD'] <= end: azioni.append("PARTENZA")
         return " + ".join(azioni) if azioni else "-"
         
     if not df_filtrato.empty:
         df_filtrato['Tipo'] = df_filtrato.apply(get_azione, axis=1)
         
-        # Selezione colonne utili
-        colonne_utili = ['Tipo', 'Vessel', 'ETB', 'ETD', 'Agent', 'Viaggio']
-        colonne_finali = [c for c in colonne_utili if c in df_filtrato.columns]
+        # Colonne da mostrare (cerchiamo di uniformare)
+        # Nota: TASCO potrebbe non avere "Agent" o "Viaggio", quindi usiamo col. intersezione o riempiamo vuoti
+        cols_desired = ['Terminal', 'Tipo', 'Vessel', 'ETB', 'ETD', 'Agent']
+        for c in cols_desired:
+            if c not in df_filtrato.columns:
+                df_filtrato[c] = "" # Crea colonna vuota se manca
+                
+        st.success(f"Trovate {len(df_filtrato)} manovre totali (Container + Petroli)!")
         
-        st.success(f"Trovate {len(df_filtrato)} manovre operative!")
-        
-        # Applicazione Stili
         st.dataframe(
-            df_filtrato[colonne_finali].style.apply(style_manovre, axis=1).format({
+            df_filtrato[cols_desired].style.apply(style_manovre, axis=1).format({
                 'ETB': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-",
                 'ETD': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-"
             }),
@@ -168,9 +226,18 @@ if not df.empty:
             hide_index=True
         )
     else:
-        st.info("Nessuna manovra (Arrivo/Partenza) prevista in questo turno.")
+        st.info("Nessuna manovra prevista nel turno per nessuno dei terminal.")
 
-    with st.expander("Visualizza Tabella Completa (Tutte le navi)"):
-        st.dataframe(df)
+    # TABELLE COMPLETE IN BASSO
+    c1, c2 = st.columns(2)
+    with c1:
+        with st.expander("Tabella Completa TMT"):
+            st.dataframe(df_tmt)
+    with c2:
+        with st.expander("Tabella Completa SIOT (TASCO)"):
+            if df_tasco.empty:
+                st.warning("Nessun dato SIOT o errore Login (Verifica Secrets).")
+            else:
+                st.dataframe(df_tasco)
 else:
-    st.error("Non sono riuscito a scaricare la tabella. Se vedi questo errore, assicurati che il file packages.txt esista.")
+    st.error("Non sono riuscito a scaricare nessun dato. Riprova.")
