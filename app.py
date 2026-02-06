@@ -1,6 +1,9 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, time, timedelta
+import os
+import glob
+import time as time_module
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -8,12 +11,11 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-import time as time_module
 
 # --- CONFIGURAZIONE ---
 st.set_page_config(page_title="Monitor Manovre Porto", layout="wide")
 
-# --- FUNZIONE SETUP BROWSER ---
+# --- FUNZIONE SETUP BROWSER CON DOWNLOAD ---
 def get_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless")
@@ -21,6 +23,18 @@ def get_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
+    
+    # CONFIGURAZIONE DOWNLOAD
+    # Diciamo a Chrome di scaricare i file nella cartella corrente del server
+    download_dir = os.getcwd()
+    prefs = {
+        "download.default_directory": download_dir,
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
+    
     service = Service("/usr/bin/chromedriver")
     return webdriver.Chrome(service=service, options=chrome_options)
 
@@ -43,7 +57,7 @@ def fetch_tmt_data(driver):
         print(f"Errore TMT: {e}")
     return pd.DataFrame()
 
-# --- 2. SCRAPING TASCO (Petroliere - SIOT) ---
+# --- 2. SCRAPING TASCO (Via Excel Export) ---
 def fetch_tasco_data(driver):
     if "tasco" not in st.secrets:
         st.error("⚠️ Configura i Secrets [tasco]!")
@@ -51,18 +65,15 @@ def fetch_tasco_data(driver):
 
     login_url = "https://tasco.tal-oil.com/ui/login"
     
-    st.toast("Accesso SIOT in corso... (Step 1/3)", icon="⛽")
+    st.toast("Accesso SIOT... (1/4)", icon="⛽")
     
     try:
-        wait = WebDriverWait(driver, 15)
+        wait = WebDriverWait(driver, 20)
         
         # --- FASE 1: LOGIN ---
         driver.get(login_url)
-        
-        # Cerchiamo password e username
         pass_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='password']")))
         try:
-            # Cerca input vicino alla scritta "Login name"
             user_input = driver.find_element(By.XPATH, "//input[preceding::*[contains(text(), 'Login name')]]")
         except:
             user_input = driver.find_element(By.CSS_SELECTOR, "input[type='text']")
@@ -72,85 +83,112 @@ def fetch_tasco_data(driver):
         pass_input.clear()
         pass_input.send_keys(st.secrets["tasco"]["password"])
         pass_input.send_keys(Keys.RETURN)
-        
-        time_module.sleep(5) # Attesa post-login
+        time_module.sleep(5)
 
-        # --- FASE 2: CLIC SU "Access to TIMOS" ---
-        st.toast("Navigazione verso TIMOS... (Step 2/3)", icon="🖱️")
-        
-        # Cerchiamo qualsiasi elemento contenga quel testo esatto
+        # --- FASE 2: TIMOS ---
+        st.toast("Apro TIMOS... (2/4)", icon="🖱️")
         try:
             btn_timos = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Access to TIMOS')]")))
             btn_timos.click()
         except:
-            st.error("Non ho trovato il tasto 'Access to TIMOS'. Verifica se il login è andato a buon fine.")
+            st.error("Pulsante TIMOS non trovato.")
             return pd.DataFrame()
-            
         time_module.sleep(5)
 
-        # --- FASE 3: CLIC SU "Terminal Basic Blackboard" ---
-        st.toast("Apertura Blackboard... (Step 3/3)", icon="📊")
-        
+        # --- FASE 3: BLACKBOARD ---
+        st.toast("Apro Blackboard... (3/4)", icon="📊")
         try:
             btn_bb = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Terminal Basic Blackboard')]")))
             btn_bb.click()
         except:
-            st.error("Non ho trovato il tasto 'Terminal Basic Blackboard'.")
+            st.error("Pulsante Blackboard non trovato.")
             return pd.DataFrame()
-            
-        time_module.sleep(5)
+        time_module.sleep(8)
 
-        # --- FASE 4: LETTURA DATI ---
-        # Cerchiamo la tabella tramite la parola "POB" o "Tanker Name"
-        dfs = pd.read_html(driver.page_source, match="Tanker Name", flavor='html5lib')
+        # --- FASE 4: CLICK SU EXPORT ---
+        st.toast("Scarico Excel... (4/4)", icon="📥")
         
-        if len(dfs) > 0:
-            df = dfs[0]
-            # Pulizia nomi colonne: rimuoviamo caratteri strani e spazi
-            df.columns = [str(c).replace("?","").replace(".","").strip() for c in df.columns]
-            
-            # Mappatura colonne TASCO -> Standard App
-            # POB = Arrivo (ETB)
-            # TLB = Partenza (ETD)
-            rename_map = {'POB': 'ETB', 'TLB': 'ETD', 'Tanker Name': 'Vessel'}
-            df = df.rename(columns=rename_map)
-            
-            # PULIZIA DATE TASCO (Formato: "05.02." o "18:30")
-            # Problema: Pandas read_html a volte sdoppia le righe o mette le date in colonne separate.
-            # Per ora proviamo a convertire brutalmente
-            
-            current_year = datetime.now().year
-            
-            for col in ['ETB', 'ETD']:
-                if col in df.columns:
-                    # Funzione personalizzata per capire le date TASCO
-                    def parse_tasco_date(val):
-                        val = str(val).strip()
-                        # Se è solo un orario "18:30", manca la data. 
-                        # NOTA: La tabella incollata è complessa, proviamo a vedere come arriva.
-                        # Spesso read_html mette data e ora insieme se sono nella stessa cella HTML.
-                        try:
-                            # Caso 1: C'è giorno e mese "05.02. 18:30"
-                            return pd.to_datetime(f"{val}{current_year}", format="%d.%m. %H:%M%Y", dayfirst=True)
-                        except:
-                            try:
-                                # Caso 2: Solo orario? Speriamo pandas l'abbia unito.
-                                return pd.to_datetime(val, dayfirst=True)
-                            except:
-                                return pd.NaT
-                                
-                    df[col] = df[col].apply(parse_tasco_date)
+        # Pulizia cartella: rimuoviamo vecchi file xls/xlsx prima di scaricare
+        for f in glob.glob("*.xls*"):
+            try: os.remove(f)
+            except: pass
 
-            df['Terminal'] = 'SIOT (Petroli)'
-            return df
-        else:
+        # Cerchiamo il tasto Export
+        try:
+            # Cerca un elemento che contiene la parola "Export" (tasto o link)
+            btn_export = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Export')]")))
+            btn_export.click()
+        except:
+            # Se fallisce, proviamo a cercare un'icona o un titolo specifico se me lo descrivi meglio
+            # Per ora proviamo un selettore generico "Export"
+            st.error("Non trovo il tasto 'Export'.")
             return pd.DataFrame()
+            
+        # --- FASE 5: ATTESA DOWNLOAD ---
+        # Aspettiamo che compaia un file .xlsx o .xls
+        file_scaricato = None
+        for i in range(15): # Aspetta max 15 secondi
+            files = glob.glob("*.xls*") # Cerca file Excel
+            if files:
+                file_scaricato = files[0] # Prendi il primo trovato
+                break
+            time_module.sleep(1)
+            
+        if not file_scaricato:
+            st.error("Timeout: Il file Excel non è stato scaricato.")
+            return pd.DataFrame()
+            
+        st.success(f"File scaricato: {file_scaricato}")
+        
+        # --- FASE 6: LETTURA EXCEL ---
+        # Pandas legge direttamente l'Excel
+        df = pd.read_excel(file_scaricato)
+        
+        # Pulizia File (opzionale, per non intasare il server)
+        try: os.remove(file_scaricato)
+        except: pass
+        
+        return process_tasco_df(df)
             
     except Exception as e:
-        st.error(f"Errore Navigazione TASCO: {str(e)}")
+        st.error(f"Errore Tecnico TASCO: {str(e)}")
         return pd.DataFrame()
 
-# --- LOGICA TURNI ---
+def process_tasco_df(df):
+    """Funzione di pulizia specifica per la tabella TASCO"""
+    # Rimuove righe vuote o intestazioni ripetute
+    df = df.dropna(how='all')
+    
+    # Pulisce nomi colonne
+    df.columns = [str(c).replace("?","").replace(".","").strip() for c in df.columns]
+    
+    # Rinomina colonne
+    rename_map = {'POB': 'ETB', 'TLB': 'ETD', 'Tanker Name': 'Vessel', 'Tanker': 'Vessel'}
+    df = df.rename(columns=rename_map)
+    
+    # Gestione anno corrente
+    current_year = datetime.now().year
+    
+    def parse_tasco_date(val):
+        val = str(val).strip()
+        if not val or val.lower() == 'nan': return pd.NaT
+        # Formato Excel spesso è già datetime, ma se è stringa "05.02."
+        try:
+            if isinstance(val, str) and val.count('.') >= 2: # es 05.02.
+                return pd.to_datetime(f"{val}{current_year}", format="%d.%m.%Y", dayfirst=True)
+        except: pass
+        
+        # Se arriva come datetime da Excel, perfetto
+        return pd.to_datetime(val, errors='coerce')
+
+    for col in ['ETB', 'ETD']:
+        if col in df.columns:
+            df[col] = df[col].apply(parse_tasco_date)
+
+    df['Terminal'] = 'SIOT (Petroli)'
+    return df
+
+# --- LOGICA TURNI (INVARIATA) ---
 def get_orari_turno(ora_riferimento, tipo_visualizzazione):
     t_mattina_start = ora_riferimento.replace(hour=8, minute=0, second=0, microsecond=0)
     t_sera_start = ora_riferimento.replace(hour=20, minute=0, second=0, microsecond=0)
@@ -236,12 +274,11 @@ with st.spinner("Scaricamento dati in corso..."):
 
 # --- VISUALIZZAZIONE ---
 if not df_total.empty:
-    # Filtro
-    df_filtrato = pd.DataFrame()
     if 'ETB' in df_total.columns and 'ETD' in df_total.columns:
-        # Assicuriamoci che siano date valide
         mask = ((df_total['ETB'] >= start) & (df_total['ETB'] <= end)) | ((df_total['ETD'] >= start) & (df_total['ETD'] <= end))
         df_filtrato = df_total[mask].copy()
+    else:
+        df_filtrato = pd.DataFrame()
     
     def get_azione(row):
         azioni = []
