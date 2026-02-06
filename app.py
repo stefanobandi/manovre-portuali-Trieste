@@ -8,25 +8,40 @@ from datetime import datetime, time
 st.set_page_config(page_title="Monitor Manovre Trieste", layout="wide")
 
 def fetch_tmt_data():
-    """Funzione per pescare i dati dal sito TMT"""
+    """Funzione per pescare i dati dal sito TMT simulando un browser"""
     url = "https://www.trieste-marine-terminal.com/it/berthing-plan"
+    
+    # Header per far credere al sito che siamo un browser reale
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status() # Controlla se la pagina risponde correttamente
+        
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Cerchiamo la tabella nel sito
-        tables = soup.find_all('table')
-        if not tables:
+        # Cerchiamo la tabella specifica del Berthing Plan
+        table = soup.find('table', {'class': 'table'}) 
+        
+        if not table:
+            # Prova alternativa se la classe è diversa
+            table = soup.find('table')
+
+        if table:
+            # Leggiamo la tabella con pandas
+            df = pd.read_html(str(table))[0]
+            
+            # Rinominiamo le colonne per uniformità (TMT usa Vessel, Arrival, ETB, ETD ecc.)
+            # Spesso le colonne hanno spazi o nomi leggermente diversi
+            df.columns = [c.strip() for c in df.columns]
+            return df
+        else:
             return pd.DataFrame()
             
-        # Estraiamo la prima tabella (Berthing Plan)
-        df = pd.read_html(str(tables[0]))[0]
-        
-        # Pulizia base delle colonne (nomi tipici TMT: Vessel, ETB, ETD)
-        # Nota: TMT spesso usa nomi colonne specifici, se cambiano aggiorneremo qui
-        return df
     except Exception as e:
-        st.error(f"Errore nel recupero dati TMT: {e}")
+        st.error(f"Errore tecnico nel recupero dati: {e}")
         return pd.DataFrame()
 
 def check_turno():
@@ -41,7 +56,7 @@ def check_turno():
 
 st.title("🚢 Monitor Manovre Rimorchiatore")
 
-# Barra superiore con Refresh e Info Turno
+# Barra superiore
 col1, col2, col3 = st.columns([2, 2, 2])
 
 with col1:
@@ -62,22 +77,23 @@ with col3:
 
 st.divider()
 
-# Simulazione o recupero dati reali
-with st.spinner("Pescando dati da TMT..."):
+# Recupero dati
+with st.spinner("Connessione al terminal in corso..."):
     dati_tmt = fetch_tmt_data()
 
 if not dati_tmt.empty:
-    st.subheader("Navi Container (TMT)")
+    st.subheader("Situazione Navi Container (TMT)")
     
-    # Mostriamo la tabella grezza per ora per capire come arrivano i dati
-    # Nelle fasi successive filtreremo per ETB/ETD e per l'orario di turno scelto
+    # Visualizzazione dei dati estratti
     st.dataframe(dati_tmt, use_container_width=True)
     
-    st.caption(f"Ultimo aggiornamento: {datetime.now().strftime('%H:%M:%S')}")
+    # Nota per il debug: mostriamo i nomi delle colonne trovate
+    st.write(f"Colonne rilevate: {', '.join(dati_tmt.columns)}")
+    
+    st.caption(f"Ultimo aggiornamento: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 else:
-    st.warning("Nessun dato trovato o problema di connessione al sito TMT.")
+    st.error("Il sito TMT non ha risposto. Riprova tra pochi istanti col tasto Aggiorna.")
 
-# --- LOGICA TURNI (IN SVILUPPO) ---
-st.sidebar.header("Impostazioni Turno")
+# Sidebar per test
+st.sidebar.header("Opzioni")
 ora_manuale = st.sidebar.time_input("Simula orario attuale", datetime.now().time())
-st.sidebar.write("Questa funzione servirà per testare l'app fuori orario di lavoro.")
