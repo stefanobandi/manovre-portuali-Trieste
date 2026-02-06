@@ -4,39 +4,39 @@ from datetime import datetime, time, timedelta
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 import time as time_module
 
 # --- CONFIGURAZIONE ---
 st.set_page_config(page_title="Monitor Manovre TMT", layout="wide")
 
-# --- FUNZIONE SCRAPING CON SELENIUM ---
+# --- FUNZIONE SCRAPING CON SELENIUM (CORRETTA) ---
 def fetch_tmt_data_selenium():
     url = "https://www.trieste-marine-terminal.com/it"
     
-    # Impostazioni per il browser "invisibile" (Headless)
+    # Opzioni per rendere il browser compatibile con l'ambiente server Linux
     chrome_options = Options()
-    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--headless") # Esegue senza interfaccia grafica
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     
     try:
-        # Installazione e avvio del browser
-        service = Service(ChromeDriverManager().install())
+        # MODIFICA FONDAMENTALE: Usiamo il driver di sistema
+        # Questo driver è installato grazie al file packages.txt e corrisponde esattamente alla versione di Chrome
+        service = Service("/usr/bin/chromedriver")
+        
         driver = webdriver.Chrome(service=service, options=chrome_options)
         
         driver.get(url)
         
-        # ATTESA FONDAMENTALE: Aspettiamo 5 secondi che il JavaScript carichi la tabella
+        # Aspettiamo 5 secondi che il sito carichi i dati
         time_module.sleep(5)
         
-        # Leggiamo l'HTML ora che è completo
+        # Leggiamo l'HTML completo
         html_completo = driver.page_source
         driver.quit()
         
         # Cerchiamo le tabelle nell'HTML completo
-        # Usiamo match="Vessel" per trovare la tabella giusta
         dfs = pd.read_html(html_completo, match="Vessel", flavor='html5lib')
         
         if len(dfs) > 0:
@@ -56,7 +56,7 @@ def fetch_tmt_data_selenium():
         st.error(f"Errore Browser: {e}")
         return pd.DataFrame()
 
-# --- LOGICA TURNI (IDENTICA A PRIMA) ---
+# --- LOGICA TURNI ---
 def get_orari_turno(ora_riferimento, tipo_visualizzazione):
     t_mattina_start = ora_riferimento.replace(hour=8, minute=0, second=0, microsecond=0)
     t_sera_start = ora_riferimento.replace(hour=20, minute=0, second=0, microsecond=0)
@@ -107,7 +107,7 @@ with col_info:
 st.divider()
 
 # Esecuzione
-with st.spinner("Avvio browser remoto e scaricamento dati (richiede circa 10s)..."):
+with st.spinner("Scaricamento dati in corso..."):
     df = fetch_tmt_data_selenium()
 
 if not df.empty:
@@ -125,7 +125,7 @@ if not df.empty:
     if not df_filtrato.empty:
         df_filtrato['Tipo'] = df_filtrato.apply(get_azione, axis=1)
         
-        # Selezione colonne utili (quelle che mi hai incollato)
+        # Selezione colonne utili
         colonne_utili = ['Tipo', 'Vessel', 'ETB', 'ETD', 'Agent', 'Viaggio']
         colonne_finali = [c for c in colonne_utili if c in df_filtrato.columns]
         
@@ -144,4 +144,4 @@ if not df.empty:
     with st.expander("Visualizza Tabella Completa (Tutte le navi)"):
         st.dataframe(df)
 else:
-    st.error("Non sono riuscito a scaricare la tabella. Riprova tra poco.")
+    st.error("Non sono riuscito a scaricare la tabella. Se vedi questo errore, assicurati che il file packages.txt esista.")
