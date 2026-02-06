@@ -4,7 +4,7 @@ import requests
 from datetime import datetime, time, timedelta
 import urllib3
 
-# Disabilita gli avvisi di sicurezza SSL (per siti istituzionali/portuali)
+# Disabilita gli avvisi di sicurezza SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(page_title="Monitor Manovre TMT", layout="wide")
@@ -13,32 +13,27 @@ st.set_page_config(page_title="Monitor Manovre TMT", layout="wide")
 def fetch_tmt_home_data():
     url = "https://www.trieste-marine-terminal.com/it"
     
-    # Headers ancora più completi per sembrare un vero Chrome
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
         'Referer': 'https://www.google.com/'
     }
     
     try:
-        # 1. Tentativo di connessione
         session = requests.Session()
         response = session.get(url, headers=headers, timeout=20, verify=False)
         
-        # DEBUG: Mostriamo lo stato della connessione se fallisce dopo
         if response.status_code != 200:
             st.error(f"Il sito ha risposto con codice: {response.status_code}")
             return pd.DataFrame()
 
-        # 2. Ricerca brutale della tabella con Pandas
-        # Cerchiamo qualsiasi tabella che contenga la parola "ETB" o "Vessel"
-        dfs = pd.read_html(response.text, match="Vessel")
+        # MODIFICA QUI: Aggiunto flavor='html5lib' per usare la nuova libreria
+        dfs = pd.read_html(response.text, match="Vessel", flavor='html5lib')
         
         if len(dfs) > 0:
-            df = dfs[0] # Prendi la prima tabella trovata
+            df = dfs[0]
             
-            # Pulizia nomi colonne (rimuove spazi e caratteri strani)
+            # Pulizia nomi colonne
             df.columns = [str(c).strip() for c in df.columns]
             
             # Converti le date
@@ -48,11 +43,11 @@ def fetch_tmt_home_data():
             
             return df
         else:
-            st.warning("Connessione riuscita, ma non ho trovato tabelle con la parola 'Vessel' nella pagina.")
+            st.warning("Connessione riuscita, ma non ho trovato tabelle con la parola 'Vessel'.")
             return pd.DataFrame()
 
     except Exception as e:
-        st.error(f"ERRORE DETTAGLIATO: {str(e)}")
+        st.error(f"ERRORE: {str(e)}")
         return pd.DataFrame()
 
 # --- LOGICA TURNI ---
@@ -80,7 +75,7 @@ def get_orari_turno(ora_riferimento, tipo_visualizzazione):
         return prossimo_start, prossimo_end, "Prossimo Turno"
 
 # --- INTERFACCIA ---
-st.title("⚓ Monitor Manovre TMT (Debug Mode)")
+st.title("⚓ Monitor Manovre TMT")
 
 col_btn, col_info = st.columns([1, 3])
 with col_btn:
@@ -107,12 +102,13 @@ with st.spinner("Connessione al TMT in corso..."):
     df = fetch_tmt_home_data()
 
 if not df.empty:
-    # Filtro
+    # Filtro Manovre
     mask = ((df['ETB'] >= start) & (df['ETB'] <= end)) | ((df['ETD'] >= start) & (df['ETD'] <= end))
     df_filtrato = df[mask].copy()
     
     if not df_filtrato.empty:
         st.success(f"Trovate {len(df_filtrato)} manovre!")
+        # Evidenziamo arrivi e partenze
         st.dataframe(df_filtrato, use_container_width=True)
     else:
         st.info("Nessuna nave in movimento nel tuo orario.")
