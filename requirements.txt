@@ -5,3 +5,4 @@ beautifulsoup4
 lxml
 html5lib
 openpyxl
+pytz
