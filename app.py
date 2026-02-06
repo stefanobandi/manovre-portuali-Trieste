@@ -15,7 +15,15 @@ from selenium.webdriver.support import expected_conditions as EC
 # --- CONFIGURAZIONE ---
 st.set_page_config(page_title="Monitor Manovre Porto", layout="wide")
 
-# --- FUNZIONE SETUP BROWSER CON DOWNLOAD ---
+# --- GESTIONE DELLA MEMORIA (SESSION STATE) ---
+if 'dati_totali' not in st.session_state:
+    st.session_state.dati_totali = pd.DataFrame()
+if 'ultimo_aggiornamento' not in st.session_state:
+    st.session_state.ultimo_aggiornamento = None
+if 'debug_msg_tasco' not in st.session_state:
+    st.session_state.debug_msg_tasco = ""
+
+# --- FUNZIONE SETUP BROWSER ---
 def get_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless")
@@ -24,8 +32,6 @@ def get_driver():
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     
-    # CONFIGURAZIONE DOWNLOAD
-    # Diciamo a Chrome di scaricare i file nella cartella corrente del server
     download_dir = os.getcwd()
     prefs = {
         "download.default_directory": download_dir,
@@ -38,7 +44,7 @@ def get_driver():
     service = Service("/usr/bin/chromedriver")
     return webdriver.Chrome(service=service, options=chrome_options)
 
-# --- 1. SCRAPING TMT (Container) ---
+# --- 1. SCRAPING TMT ---
 def fetch_tmt_data(driver):
     url = "https://www.trieste-marine-terminal.com/it"
     try:
@@ -57,8 +63,9 @@ def fetch_tmt_data(driver):
         print(f"Errore TMT: {e}")
     return pd.DataFrame()
 
-# --- 2. SCRAPING TASCO (Via Excel Export) ---
+# --- 2. SCRAPING TASCO (Excel Export) ---
 def fetch_tasco_data(driver):
+    st.session_state.debug_msg_tasco = "" # Reset messaggio debug
     if "tasco" not in st.secrets:
         st.error("⚠️ Configura i Secrets [tasco]!")
         return pd.DataFrame()
@@ -70,7 +77,7 @@ def fetch_tasco_data(driver):
     try:
         wait = WebDriverWait(driver, 20)
         
-        # --- FASE 1: LOGIN ---
+        # LOGIN
         driver.get(login_url)
         pass_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='password']")))
         try:
@@ -85,100 +92,77 @@ def fetch_tasco_data(driver):
         pass_input.send_keys(Keys.RETURN)
         time_module.sleep(5)
 
-        # --- FASE 2: TIMOS ---
+        # TIMOS
         st.toast("Apro TIMOS... (2/4)", icon="🖱️")
         try:
             btn_timos = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Access to TIMOS')]")))
             btn_timos.click()
         except:
-            st.error("Pulsante TIMOS non trovato.")
             return pd.DataFrame()
         time_module.sleep(5)
 
-        # --- FASE 3: BLACKBOARD ---
+        # BLACKBOARD
         st.toast("Apro Blackboard... (3/4)", icon="📊")
         try:
             btn_bb = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Terminal Basic Blackboard')]")))
             btn_bb.click()
         except:
-            st.error("Pulsante Blackboard non trovato.")
             return pd.DataFrame()
         time_module.sleep(8)
 
-        # --- FASE 4: CLICK SU EXPORT ---
+        # EXPORT
         st.toast("Scarico Excel... (4/4)", icon="📥")
-        
-        # Pulizia cartella: rimuoviamo vecchi file xls/xlsx prima di scaricare
         for f in glob.glob("*.xls*"):
             try: os.remove(f)
             except: pass
 
-        # Cerchiamo il tasto Export
         try:
-            # Cerca un elemento che contiene la parola "Export" (tasto o link)
             btn_export = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Export')]")))
             btn_export.click()
         except:
-            # Se fallisce, proviamo a cercare un'icona o un titolo specifico se me lo descrivi meglio
-            # Per ora proviamo un selettore generico "Export"
-            st.error("Non trovo il tasto 'Export'.")
             return pd.DataFrame()
             
-        # --- FASE 5: ATTESA DOWNLOAD ---
-        # Aspettiamo che compaia un file .xlsx o .xls
+        # DOWNLOAD
         file_scaricato = None
-        for i in range(15): # Aspetta max 15 secondi
-            files = glob.glob("*.xls*") # Cerca file Excel
+        for i in range(15):
+            files = glob.glob("*.xls*")
             if files:
-                file_scaricato = files[0] # Prendi il primo trovato
+                file_scaricato = files[0]
                 break
             time_module.sleep(1)
             
         if not file_scaricato:
-            st.error("Timeout: Il file Excel non è stato scaricato.")
             return pd.DataFrame()
             
-        st.success(f"File scaricato: {file_scaricato}")
+        # Messaggio salvato per dopo (non mostrato in alto)
+        st.session_state.debug_msg_tasco = f"File elaborato: {os.path.basename(file_scaricato)}"
         
-        # --- FASE 6: LETTURA EXCEL ---
-        # Pandas legge direttamente l'Excel
+        # LETTURA
         df = pd.read_excel(file_scaricato)
-        
-        # Pulizia File (opzionale, per non intasare il server)
         try: os.remove(file_scaricato)
         except: pass
         
         return process_tasco_df(df)
             
     except Exception as e:
-        st.error(f"Errore Tecnico TASCO: {str(e)}")
         return pd.DataFrame()
 
 def process_tasco_df(df):
-    """Funzione di pulizia specifica per la tabella TASCO"""
-    # Rimuove righe vuote o intestazioni ripetute
     df = df.dropna(how='all')
-    
-    # Pulisce nomi colonne
     df.columns = [str(c).replace("?","").replace(".","").strip() for c in df.columns]
     
-    # Rinomina colonne
     rename_map = {'POB': 'ETB', 'TLB': 'ETD', 'Tanker Name': 'Vessel', 'Tanker': 'Vessel'}
     df = df.rename(columns=rename_map)
     
-    # Gestione anno corrente
     current_year = datetime.now().year
     
     def parse_tasco_date(val):
         val = str(val).strip()
         if not val or val.lower() == 'nan': return pd.NaT
-        # Formato Excel spesso è già datetime, ma se è stringa "05.02."
         try:
-            if isinstance(val, str) and val.count('.') >= 2: # es 05.02.
+            if isinstance(val, str) and val.count('.') >= 2:
                 return pd.to_datetime(f"{val}{current_year}", format="%d.%m.%Y", dayfirst=True)
         except: pass
-        
-        # Se arriva come datetime da Excel, perfetto
         return pd.to_datetime(val, errors='coerce')
 
     for col in ['ETB', 'ETD']:
@@ -188,7 +172,25 @@ def process_tasco_df(df):
     df['Terminal'] = 'SIOT (Petroli)'
     return df
 
-# --- LOGICA TURNI (INVARIATA) ---
+# --- FUNZIONE MAESTRA DI AGGIORNAMENTO ---
+def aggiorna_dati():
+    with st.spinner("Scaricamento dati in corso... (Attendi circa 30s)"):
+        driver = get_driver()
+        df_tmt = fetch_tmt_data(driver)
+        df_tasco = fetch_tasco_data(driver)
+        driver.quit()
+
+        frames = []
+        if not df_tmt.empty: frames.append(df_tmt)
+        if not df_tasco.empty: frames.append(df_tasco)
+        
+        if frames:
+            st.session_state.dati_totali = pd.concat(frames, ignore_index=True)
+            st.session_state.ultimo_aggiornamento = datetime.now().strftime("%H:%M:%S")
+        else:
+            st.session_state.dati_totali = pd.DataFrame()
+
+# --- LOGICA TURNI ---
 def get_orari_turno(ora_riferimento, tipo_visualizzazione):
     t_mattina_start = ora_riferimento.replace(hour=8, minute=0, second=0, microsecond=0)
     t_sera_start = ora_riferimento.replace(hour=20, minute=0, second=0, microsecond=0)
@@ -243,36 +245,30 @@ dt_rif = datetime.combine(data_simulata, ora_simulata)
 col_btn, col_info, col_sel = st.columns([1, 2, 2])
 
 with col_btn:
-    if st.button("🔄 AGGIORNA TUTTO", type="primary"):
-        st.rerun()
+    # PULSANTE CHE SCARICA
+    if st.button("🔄 AGGIORNA SCARICANDO I DATI", type="primary"):
+        aggiorna_dati()
+
+# Se è la prima volta che apro l'app, scarico automatico
+if st.session_state.dati_totali.empty and st.session_state.ultimo_aggiornamento is None:
+    aggiorna_dati()
 
 with col_sel:
+    # RADIO CHE FILTRA SOLO (senza scaricare)
     scelta_vista = st.radio("Filtra per:", ["Turno Attuale", "Prossimo Turno"], horizontal=True)
 
 start, end, nome_turno = get_orari_turno(dt_rif, scelta_vista)
 
 with col_info:
     st.info(f"Turno: **{nome_turno}**\nFiltro: {start.strftime('%H:%M')} - {end.strftime('%H:%M')}")
+    if st.session_state.ultimo_aggiornamento:
+        st.caption(f"Dati scaricati alle: {st.session_state.ultimo_aggiornamento}")
 
 st.divider()
 
-# --- ESECUZIONE ---
-with st.spinner("Scaricamento dati in corso..."):
-    driver = get_driver()
-    df_tmt = fetch_tmt_data(driver)
-    df_tasco = fetch_tasco_data(driver)
-    driver.quit()
+# --- VISUALIZZAZIONE DATI (Dalla Memoria) ---
+df_total = st.session_state.dati_totali
 
-    frames = []
-    if not df_tmt.empty: frames.append(df_tmt)
-    if not df_tasco.empty: frames.append(df_tasco)
-    
-    if frames:
-        df_total = pd.concat(frames, ignore_index=True)
-    else:
-        df_total = pd.DataFrame()
-
-# --- VISUALIZZAZIONE ---
 if not df_total.empty:
     if 'ETB' in df_total.columns and 'ETD' in df_total.columns:
         mask = ((df_total['ETB'] >= start) & (df_total['ETB'] <= end)) | ((df_total['ETD'] >= start) & (df_total['ETD'] <= end))
@@ -280,19 +276,36 @@ if not df_total.empty:
     else:
         df_filtrato = pd.DataFrame()
     
-    def get_azione(row):
-        azioni = []
-        if 'ETB' in row and pd.notnull(row['ETB']) and start <= row['ETB'] <= end: azioni.append("ARRIVO")
-        if 'ETD' in row and pd.notnull(row['ETD']) and start <= row['ETD'] <= end: azioni.append("PARTENZA")
-        return " + ".join(azioni) if azioni else "-"
-        
+    # Calcolo Tipo Manovra e Ordinamento
     if not df_filtrato.empty:
-        df_filtrato['Tipo'] = df_filtrato.apply(get_azione, axis=1)
+        
+        def processa_riga(row):
+            # Determina tipo manovra
+            azioni = []
+            orari_rilevanti = [] # Serve per l'ordinamento
+            
+            if pd.notnull(row['ETB']) and start <= row['ETB'] <= end: 
+                azioni.append("ARRIVO")
+                orari_rilevanti.append(row['ETB'])
+                
+            if pd.notnull(row['ETD']) and start <= row['ETD'] <= end: 
+                azioni.append("PARTENZA")
+                orari_rilevanti.append(row['ETD'])
+            
+            tipo = " + ".join(azioni) if azioni else "-"
+            # Prende l'orario più presto tra quelli rilevanti per ordinare
+            sort_key = min(orari_rilevanti) if orari_rilevanti else pd.NaT
+            
+            return pd.Series([tipo, sort_key])
+
+        df_filtrato[['Tipo', 'SortKey']] = df_filtrato.apply(processa_riga, axis=1)
+        
+        # ORDINAMENTO TEMPORALE
+        df_filtrato = df_filtrato.sort_values(by='SortKey')
         
         cols_desired = ['Terminal', 'Tipo', 'Vessel', 'ETB', 'ETD', 'Agent']
         for c in cols_desired:
-            if c not in df_filtrato.columns:
-                df_filtrato[c] = ""
+            if c not in df_filtrato.columns: df_filtrato[c] = ""
                 
         st.success(f"Trovate {len(df_filtrato)} manovre totali!")
         
@@ -308,15 +321,18 @@ if not df_total.empty:
         st.info("Nessuna manovra prevista nel turno.")
 
     st.write("---")
+    
+    # TABELLE COMPLETE (INFO DEBUG SPOSTATE QUI)
     c1, c2 = st.columns(2)
     with c1:
-        with st.expander("Tabella TMT"):
-            st.dataframe(df_tmt)
+        with st.expander("Tabella Completa TMT"):
+            st.dataframe(df_total[df_total['Terminal'].str.contains("TMT")])
     with c2:
-        with st.expander("Tabella SIOT"):
-            if df_tasco.empty:
-                st.warning("Dati SIOT non disponibili.")
-            else:
-                st.dataframe(df_tasco)
+        with st.expander("Tabella Completa SIOT"):
+            st.write(f"ℹ️ {st.session_state.debug_msg_tasco}") # Messaggio file spostato qui
+            st.dataframe(df_total[df_total['Terminal'].str.contains("SIOT")])
 else:
-    st.error("Nessun dato scaricato.")
+    if st.session_state.ultimo_aggiornamento:
+        st.warning("Aggiornamento effettuato, ma non sono stati trovati dati validi.")
+    else:
+        st.info("Premi il pulsante per scaricare i dati.")
