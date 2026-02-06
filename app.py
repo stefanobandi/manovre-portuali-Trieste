@@ -6,7 +6,6 @@ import glob
 import time as time_module
 import pytz 
 
-# Import Selenium components
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -16,19 +15,15 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 # --- CONFIGURAZIONE ---
-# Sidebar nascosta di default
 st.set_page_config(page_title="Monitor Manovre Porto", layout="wide", initial_sidebar_state="collapsed")
-
-# FUSO ORARIO TRIESTE
 TZ_TRIESTE = pytz.timezone('Europe/Rome')
 
 def get_ora_trieste():
-    """Restituisce l'ora corrente a Trieste pulita per confronti"""
     return datetime.now(TZ_TRIESTE).replace(tzinfo=None)
 
 # --- SESSION STATE ---
 if 'dati_totali' not in st.session_state:
-    st.session_state.dati_totali = pd.DataFrame()
+    st.session_state.dati_totali = pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 if 'ultimo_aggiornamento' not in st.session_state:
     st.session_state.ultimo_aggiornamento = None
 if 'debug_msg_tasco' not in st.session_state:
@@ -55,6 +50,27 @@ def get_driver():
     service = Service("/usr/bin/chromedriver")
     return webdriver.Chrome(service=service, options=chrome_options)
 
+# --- LOGICA DI RICOSTRUZIONE (NO DUPLICATI) ---
+def build_clean_df(source_data, terminal_name):
+    """
+    Costruisce un DataFrame da zero usando liste di dati.
+    Evita al 100% colonne duplicate.
+    source_data: dizionario con liste di valori {'Vessel': [], 'ETA': [], 'ETD': []}
+    """
+    # Creiamo il DF vergine
+    df = pd.DataFrame()
+    
+    # Inseriamo i dati. Se le lunghezze non coincidono, pandas darebbe errore,
+    # quindi ci assicuriamo che tutto abbia la stessa lunghezza del vettore Vessel
+    n_rows = len(source_data.get('Vessel', []))
+    
+    df['Terminal'] = [terminal_name] * n_rows
+    df['Vessel'] = source_data.get('Vessel', [""] * n_rows)
+    df['ETA'] = source_data.get('ETA', [pd.NaT] * n_rows)
+    df['ETD'] = source_data.get('ETD', [pd.NaT] * n_rows)
+    
+    return df
+
 # --- 1. SCRAPING TMT ---
 def fetch_tmt_data(driver):
     url = "https://www.trieste-marine-terminal.com/it"
@@ -63,42 +79,47 @@ def fetch_tmt_data(driver):
         time_module.sleep(3)
         dfs = pd.read_html(driver.page_source, match="Vessel", flavor='html5lib')
         if len(dfs) > 0:
-            df = dfs[0]
-            df.columns = [str(c).strip() for c in df.columns]
+            raw_df = dfs[0]
+            # Pulizia nomi colonne grezze
+            raw_df.columns = [str(c).strip() for c in raw_df.columns]
             
-            # --- MODIFICA 2: ETB -> ETA ---
-            if 'ETB' in df.columns:
-                df = df.rename(columns={'ETB': 'ETA'})
+            # Estrazione Dati Grezzi
+            vessels = raw_df['Vessel'].tolist() if 'Vessel' in raw_df.columns else []
             
-            # Conversione date
-            for col in ['ETA', 'ETD']:
-                if col in df.columns:
-                    df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
+            # Gestione ETA (da ETB)
+            if 'ETB' in raw_df.columns:
+                etas = pd.to_datetime(raw_df['ETB'], dayfirst=True, errors='coerce').tolist()
+            else:
+                etas = [pd.NaT] * len(vessels)
+                
+            # Gestione ETD
+            if 'ETD' in raw_df.columns:
+                etds = pd.to_datetime(raw_df['ETD'], dayfirst=True, errors='coerce').tolist()
+            else:
+                etds = [pd.NaT] * len(vessels)
             
-            df['Terminal'] = 'TMT (Molo VII)'
+            # Costruzione Dizionario Dati
+            data_dict = {
+                'Vessel': vessels,
+                'ETA': etas,
+                'ETD': etds
+            }
             
-            # --- MODIFICA 1: Teniamo solo colonne utili (Agent via) ---
-            # Standardizziamo le colonne per evitare errori di indice
-            cols_to_keep = ['Terminal', 'Vessel', 'ETA', 'ETD']
-            # Se manca qualcosa creiamo vuoto
-            for c in cols_to_keep:
-                if c not in df.columns: df[c] = pd.NaT
-            
-            return df[cols_to_keep]
+            return build_clean_df(data_dict, 'TMT (Molo VII)')
             
     except Exception as e:
         print(f"Errore TMT: {e}")
-    return pd.DataFrame()
+    
+    return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 
 # --- 2. SCRAPING TASCO ---
 def fetch_tasco_data(driver):
     st.session_state.debug_msg_tasco = "" 
     if "tasco" not in st.secrets:
         st.error("⚠️ Configura i Secrets [tasco]!")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 
     login_url = "https://tasco.tal-oil.com/ui/login"
-    
     st.toast("Accesso SIOT... (1/4)", icon="⛽")
     
     try:
@@ -129,7 +150,7 @@ def fetch_tasco_data(driver):
             btn_bb.click()
             time_module.sleep(8)
         except:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 
         # EXPORT
         st.toast("Scarico Excel... (4/4)", icon="📥")
@@ -141,7 +162,7 @@ def fetch_tasco_data(driver):
             btn_export = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Export')]")))
             btn_export.click()
         except:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
             
         # DOWNLOAD
         file_scaricato = None
@@ -153,31 +174,38 @@ def fetch_tasco_data(driver):
             time_module.sleep(1)
             
         if not file_scaricato:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
             
         st.session_state.debug_msg_tasco = f"File elaborato: {os.path.basename(file_scaricato)}"
         
-        df = pd.read_excel(file_scaricato)
+        # LEGGI EXCEL
+        raw_df = pd.read_excel(file_scaricato)
         try: os.remove(file_scaricato)
         except: pass
         
-        return process_tasco_df(df)
+        return process_tasco_raw(raw_df)
             
     except Exception as e:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 
-def process_tasco_df(df):
-    df = df.dropna(how='all')
-    df.columns = [str(c).replace("?","").replace(".","").strip() for c in df.columns]
+def process_tasco_raw(raw_df):
+    # Drop righe vuote e pulizia nomi
+    raw_df = raw_df.dropna(how='all')
+    raw_df.columns = [str(c).replace("?","").replace(".","").strip() for c in raw_df.columns]
     
-    # --- MODIFICA 2: MAPPATURA ETA/ETD ---
-    # POB -> ETA
-    # TLB -> ETD
-    rename_map = {'POB': 'ETA', 'TLB': 'ETD', 'Tanker Name': 'Vessel', 'Tanker': 'Vessel'}
-    df = df.rename(columns=rename_map)
+    # 1. Estrai Vessels
+    # Cerca la colonna giusta
+    v_col = None
+    if 'Tanker Name' in raw_df.columns: v_col = 'Tanker Name'
+    elif 'Tanker' in raw_df.columns: v_col = 'Tanker'
     
+    if v_col:
+        vessels = raw_df[v_col].tolist()
+    else:
+        vessels = ["Sconosciuto"] * len(raw_df)
+
+    # Funzione parse date
     current_year = get_ora_trieste().year
-    
     def parse_tasco_date(val):
         val = str(val).strip()
         if not val or val.lower() == 'nan': return pd.NaT
@@ -187,23 +215,31 @@ def process_tasco_df(df):
         except: pass
         return pd.to_datetime(val, errors='coerce')
 
-    for col in ['ETA', 'ETD']:
-        if col in df.columns:
-            df[col] = df[col].apply(parse_tasco_date)
+    # 2. Estrai ed Elabora ETA (da POB)
+    etas = []
+    if 'POB' in raw_df.columns:
+        etas = raw_df['POB'].apply(parse_tasco_date).tolist()
+    else:
+        etas = [pd.NaT] * len(vessels)
 
-    # --- MODIFICA 3: SOTTRAZIONE 30 MINUTI ---
-    if 'ETD' in df.columns:
-        # Sottraiamo 30 minuti dove la data esiste
-        df['ETD'] = df['ETD'].apply(lambda x: x - timedelta(minutes=30) if pd.notnull(x) else pd.NaT)
+    # 3. Estrai ed Elabora ETD (da TLB) - 30 MINUTI
+    etds = []
+    if 'TLB' in raw_df.columns:
+        # Prima convertiamo
+        temp_etds = raw_df['TLB'].apply(parse_tasco_date)
+        # Poi sottraiamo 30 min se la data è valida
+        etds = [x - timedelta(minutes=30) if pd.notnull(x) else pd.NaT for x in temp_etds]
+    else:
+        etds = [pd.NaT] * len(vessels)
 
-    df['Terminal'] = 'SIOT (Petroli)'
+    # Costruisci dizionario
+    data_dict = {
+        'Vessel': vessels,
+        'ETA': etas,
+        'ETD': etds
+    }
     
-    # Standardizzazione colonne
-    cols_to_keep = ['Terminal', 'Vessel', 'ETA', 'ETD']
-    for c in cols_to_keep:
-        if c not in df.columns: df[c] = pd.NaT
-            
-    return df[cols_to_keep]
+    return build_clean_df(data_dict, 'SIOT (Petroli)')
 
 # --- AGGIORNAMENTO ---
 def aggiorna_dati():
@@ -218,15 +254,14 @@ def aggiorna_dati():
         if not df_tasco.empty: frames.append(df_tasco)
         
         if frames:
-            # Ora che abbiamo standardizzato le colonne in entrambi i fetch, concat è sicuro
+            # Qui non può fallire perché build_clean_df crea DF identici
             st.session_state.dati_totali = pd.concat(frames, ignore_index=True)
             st.session_state.ultimo_aggiornamento = get_ora_trieste().strftime("%H:%M:%S")
         else:
-            st.session_state.dati_totali = pd.DataFrame()
+            st.session_state.dati_totali = pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 
 # --- LOGICA TURNI ---
 def get_orari_turno(ora_riferimento, tipo_visualizzazione):
-    # Rimuoviamo info timezone per i confronti diretti
     if ora_riferimento.tzinfo is not None:
         ora_riferimento = ora_riferimento.replace(tzinfo=None)
         
@@ -252,7 +287,7 @@ def get_orari_turno(ora_riferimento, tipo_visualizzazione):
     else:
         return prossimo_start, prossimo_end, "Prossimo Turno"
 
-# --- STILE E COLORI ---
+# --- STILE ---
 def style_manovre(row):
     styles = [''] * len(row.index)
     def set_style(col_name, css):
@@ -263,7 +298,6 @@ def style_manovre(row):
 
     if 'ARRIVO' in str(row['Tipo']):
         set_style('Tipo', 'background-color: #d4edda; color: black; font-weight: bold')
-        # ETA ora al posto di ETB
         set_style('ETA', 'background-color: #d4edda; color: #155724; font-weight: bold; border: 2px solid #155724')
         
     if 'PARTENZA' in str(row['Tipo']):
@@ -275,7 +309,6 @@ def style_manovre(row):
 # --- INTERFACCIA ---
 st.title("⚓ Monitor Manovre Porto di Trieste")
 
-# Sidebar nascosta con Fuso Orario Trieste
 with st.sidebar:
     st.header("🔧 Simulazione (Fuso Trieste)")
     ora_default = get_ora_trieste()
@@ -298,10 +331,9 @@ with col_sel:
 start, end, nome_turno = get_orari_turno(dt_rif, scelta_vista)
 
 with col_info:
-    # Mostriamo orari puliti
     st.info(f"Turno: **{nome_turno}**\nFiltro: {start.strftime('%H:%M')} - {end.strftime('%H:%M')}")
     if st.session_state.ultimo_aggiornamento:
-        st.caption(f"Ultimo scaricamento: {st.session_state.ultimo_aggiornamento} (Ora Locale)")
+        st.caption(f"Ultimo scaricamento: {st.session_state.ultimo_aggiornamento} (Ora TS)")
 
 st.divider()
 
@@ -321,12 +353,10 @@ if not df_total.empty:
             azioni = []
             orari_rilevanti = []
             
-            # Controllo su ETA (ex ETB)
             if pd.notnull(row['ETA']) and start <= row['ETA'] <= end: 
                 azioni.append("ARRIVO")
                 orari_rilevanti.append(row['ETA'])
                 
-            # Controllo su ETD
             if pd.notnull(row['ETD']) and start <= row['ETD'] <= end: 
                 azioni.append("PARTENZA")
                 orari_rilevanti.append(row['ETD'])
@@ -339,8 +369,8 @@ if not df_total.empty:
         df_filtrato[['Tipo', 'SortKey']] = df_filtrato.apply(processa_riga, axis=1)
         df_filtrato = df_filtrato.sort_values(by='SortKey')
         
-        # --- MODIFICA 1: SOLO COLONNE UTILI (Via Agent) ---
         cols_desired = ['Terminal', 'Tipo', 'Vessel', 'ETA', 'ETD']
+        # Fallback se mancano colonne
         for c in cols_desired:
             if c not in df_filtrato.columns: df_filtrato[c] = ""
                 
