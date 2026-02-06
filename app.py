@@ -4,9 +4,6 @@ from datetime import datetime, time, timedelta
 import os
 import glob
 import time as time_module
-import pytz 
-
-# Import Selenium components
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -16,22 +13,17 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="Monitor Manovre Porto", layout="wide", initial_sidebar_state="collapsed")
-TZ_TRIESTE = pytz.timezone('Europe/Rome')
+st.set_page_config(page_title="Monitor Manovre Porto", layout="wide")
 
-def get_ora_trieste():
-    return datetime.now(TZ_TRIESTE).replace(tzinfo=None)
-
-# --- SESSION STATE ---
+# --- GESTIONE DELLA MEMORIA (SESSION STATE) ---
 if 'dati_totali' not in st.session_state:
-    # Struttura fissa: 4 colonne. Nessuna sorpresa.
-    st.session_state.dati_totali = pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
+    st.session_state.dati_totali = pd.DataFrame()
 if 'ultimo_aggiornamento' not in st.session_state:
     st.session_state.ultimo_aggiornamento = None
 if 'debug_msg_tasco' not in st.session_state:
     st.session_state.debug_msg_tasco = ""
 
-# --- BROWSER ---
+# --- FUNZIONE SETUP BROWSER ---
 def get_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless")
@@ -52,99 +44,6 @@ def get_driver():
     service = Service("/usr/bin/chromedriver")
     return webdriver.Chrome(service=service, options=chrome_options)
 
-# --- FUNZIONI DI PULIZIA DEDICATE (RESET) ---
-
-def clean_tmt_data(df):
-    """Pulisce i dati TMT copiando solo ciò che serve in una nuova tabella."""
-    if df is None or df.empty:
-        return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
-    
-    # 1. Pulisci intestazioni
-    df.columns = [str(c).strip() for c in df.columns]
-    
-    # 2. Rimuovi duplicati (se ci sono due colonne Vessel, ne tiene una sola)
-    df = df.loc[:, ~df.columns.duplicated()]
-    
-    # 3. Creiamo la destinazione pulita
-    clean_df = pd.DataFrame()
-    clean_df['Terminal'] = ['TMT (Molo VII)'] * len(df)
-    
-    # 4. Copia Dati (Senza rinominare l'originale, copiamo e basta)
-    # TMT ha 'Vessel', 'ETB', 'ETD'
-    
-    # Vessel
-    if 'Vessel' in df.columns:
-        clean_df['Vessel'] = df['Vessel']
-    else:
-        clean_df['Vessel'] = "Sconosciuto"
-        
-    # ETA (che nel TMT si chiama ETB)
-    if 'ETB' in df.columns:
-        clean_df['ETA'] = pd.to_datetime(df['ETB'], dayfirst=True, errors='coerce')
-    else:
-        clean_df['ETA'] = pd.NaT
-        
-    # ETD
-    if 'ETD' in df.columns:
-        clean_df['ETD'] = pd.to_datetime(df['ETD'], dayfirst=True, errors='coerce')
-    else:
-        clean_df['ETD'] = pd.NaT
-        
-    return clean_df
-
-def clean_tasco_data(df):
-    """Pulisce i dati TASCO/SIOT copiando solo ciò che serve."""
-    if df is None or df.empty:
-        return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
-    
-    # 1. Drop righe vuote
-    df = df.dropna(how='all')
-    
-    # 2. Pulisci intestazioni
-    df.columns = [str(c).replace("?","").replace(".","").strip() for c in df.columns]
-    df = df.loc[:, ~df.columns.duplicated()]
-    
-    # 3. Creiamo la destinazione pulita
-    clean_df = pd.DataFrame()
-    clean_df['Terminal'] = ['SIOT (Petroli)'] * len(df)
-    
-    # 4. Copia Dati
-    # TASCO ha 'Tanker Name' (o Tanker), 'POB', 'TLB'
-    
-    # Vessel
-    if 'Tanker Name' in df.columns:
-        clean_df['Vessel'] = df['Tanker Name']
-    elif 'Tanker' in df.columns:
-        clean_df['Vessel'] = df['Tanker']
-    else:
-        clean_df['Vessel'] = "Sconosciuto"
-
-    # Preparazione date
-    current_year = get_ora_trieste().year
-    def parse_date(val):
-        val = str(val).strip()
-        if not val or val.lower() == 'nan': return pd.NaT
-        try:
-            if isinstance(val, str) and val.count('.') >= 2:
-                return pd.to_datetime(f"{val}{current_year}", format="%d.%m.%Y", dayfirst=True)
-        except: pass
-        return pd.to_datetime(val, errors='coerce')
-
-    # ETA (che nel TASCO si chiama POB)
-    if 'POB' in df.columns:
-        clean_df['ETA'] = df['POB'].apply(parse_date)
-    else:
-        clean_df['ETA'] = pd.NaT
-
-    # ETD (che nel TASCO si chiama TLB) - 30 MINUTI
-    if 'TLB' in df.columns:
-        raw_dates = df['TLB'].apply(parse_date)
-        clean_df['ETD'] = raw_dates - timedelta(minutes=30)
-    else:
-        clean_df['ETD'] = pd.NaT
-        
-    return clean_df
-
 # --- 1. SCRAPING TMT ---
 def fetch_tmt_data(driver):
     url = "https://www.trieste-marine-terminal.com/it"
@@ -153,18 +52,23 @@ def fetch_tmt_data(driver):
         time_module.sleep(3)
         dfs = pd.read_html(driver.page_source, match="Vessel", flavor='html5lib')
         if len(dfs) > 0:
-            # Passiamo subito alla funzione di pulizia dedicata
-            return clean_tmt_data(dfs[0])
+            df = dfs[0]
+            df.columns = [str(c).strip() for c in df.columns]
+            for col in ['ETB', 'ETD']:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
+            df['Terminal'] = 'TMT (Molo VII)' 
+            return df
     except Exception as e:
         print(f"Errore TMT: {e}")
-    return clean_tmt_data(None)
+    return pd.DataFrame()
 
-# --- 2. SCRAPING TASCO ---
+# --- 2. SCRAPING TASCO (Excel Export) ---
 def fetch_tasco_data(driver):
-    st.session_state.debug_msg_tasco = ""
+    st.session_state.debug_msg_tasco = "" # Reset messaggio debug
     if "tasco" not in st.secrets:
         st.error("⚠️ Configura i Secrets [tasco]!")
-        return clean_tasco_data(None)
+        return pd.DataFrame()
 
     login_url = "https://tasco.tal-oil.com/ui/login"
     
@@ -188,17 +92,23 @@ def fetch_tasco_data(driver):
         pass_input.send_keys(Keys.RETURN)
         time_module.sleep(5)
 
-        # NAVIGAZIONE
-        st.toast("Navigazione...", icon="🖱️")
+        # TIMOS
+        st.toast("Apro TIMOS... (2/4)", icon="🖱️")
         try:
             btn_timos = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Access to TIMOS')]")))
             btn_timos.click()
-            time_module.sleep(5)
+        except:
+            return pd.DataFrame()
+        time_module.sleep(5)
+
+        # BLACKBOARD
+        st.toast("Apro Blackboard... (3/4)", icon="📊")
+        try:
             btn_bb = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Terminal Basic Blackboard')]")))
             btn_bb.click()
-            time_module.sleep(8)
         except:
-            return clean_tasco_data(None)
+            return pd.DataFrame()
+        time_module.sleep(8)
 
         # EXPORT
         st.toast("Scarico Excel... (4/4)", icon="📥")
@@ -210,9 +120,9 @@ def fetch_tasco_data(driver):
             btn_export = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Export')]")))
             btn_export.click()
         except:
-            return clean_tasco_data(None)
+            return pd.DataFrame()
             
-        # ATTESA FILE
+        # DOWNLOAD
         file_scaricato = None
         for i in range(15):
             files = glob.glob("*.xls*")
@@ -222,20 +132,47 @@ def fetch_tasco_data(driver):
             time_module.sleep(1)
             
         if not file_scaricato:
-            return clean_tasco_data(None)
+            return pd.DataFrame()
             
+        # Messaggio salvato per dopo (non mostrato in alto)
         st.session_state.debug_msg_tasco = f"File elaborato: {os.path.basename(file_scaricato)}"
         
+        # LETTURA
         df = pd.read_excel(file_scaricato)
         try: os.remove(file_scaricato)
         except: pass
         
-        return clean_tasco_data(df)
+        return process_tasco_df(df)
             
     except Exception as e:
-        return clean_tasco_data(None)
+        return pd.DataFrame()
 
-# --- AGGIORNAMENTO ---
+def process_tasco_df(df):
+    df = df.dropna(how='all')
+    df.columns = [str(c).replace("?","").replace(".","").strip() for c in df.columns]
+    
+    rename_map = {'POB': 'ETB', 'TLB': 'ETD', 'Tanker Name': 'Vessel', 'Tanker': 'Vessel'}
+    df = df.rename(columns=rename_map)
+    
+    current_year = datetime.now().year
+    
+    def parse_tasco_date(val):
+        val = str(val).strip()
+        if not val or val.lower() == 'nan': return pd.NaT
+        try:
+            if isinstance(val, str) and val.count('.') >= 2:
+                return pd.to_datetime(f"{val}{current_year}", format="%d.%m.%Y", dayfirst=True)
+        except: pass
+        return pd.to_datetime(val, errors='coerce')
+
+    for col in ['ETB', 'ETD']:
+        if col in df.columns:
+            df[col] = df[col].apply(parse_tasco_date)
+
+    df['Terminal'] = 'SIOT (Petroli)'
+    return df
+
+# --- FUNZIONE MAESTRA DI AGGIORNAMENTO ---
 def aggiorna_dati():
     with st.spinner("Scaricamento dati in corso... (Attendi circa 30s)"):
         driver = get_driver()
@@ -248,17 +185,13 @@ def aggiorna_dati():
         if not df_tasco.empty: frames.append(df_tasco)
         
         if frames:
-            # Ora i dataframe sono garantiti avere le stesse 4 colonne: Terminal, Vessel, ETA, ETD
             st.session_state.dati_totali = pd.concat(frames, ignore_index=True)
-            st.session_state.ultimo_aggiornamento = get_ora_trieste().strftime("%H:%M:%S")
+            st.session_state.ultimo_aggiornamento = datetime.now().strftime("%H:%M:%S")
         else:
-            st.session_state.dati_totali = pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
+            st.session_state.dati_totali = pd.DataFrame()
 
 # --- LOGICA TURNI ---
 def get_orari_turno(ora_riferimento, tipo_visualizzazione):
-    if ora_riferimento.tzinfo is not None:
-        ora_riferimento = ora_riferimento.replace(tzinfo=None)
-        
     t_mattina_start = ora_riferimento.replace(hour=8, minute=0, second=0, microsecond=0)
     t_sera_start = ora_riferimento.replace(hour=20, minute=0, second=0, microsecond=0)
     
@@ -281,7 +214,7 @@ def get_orari_turno(ora_riferimento, tipo_visualizzazione):
     else:
         return prossimo_start, prossimo_end, "Prossimo Turno"
 
-# --- STILE ---
+# --- STILE E COLORI ---
 def style_manovre(row):
     styles = [''] * len(row.index)
     def set_style(col_name, css):
@@ -292,7 +225,7 @@ def style_manovre(row):
 
     if 'ARRIVO' in str(row['Tipo']):
         set_style('Tipo', 'background-color: #d4edda; color: black; font-weight: bold')
-        set_style('ETA', 'background-color: #d4edda; color: #155724; font-weight: bold; border: 2px solid #155724')
+        set_style('ETB', 'background-color: #d4edda; color: #155724; font-weight: bold; border: 2px solid #155724')
         
     if 'PARTENZA' in str(row['Tipo']):
         set_style('Tipo', 'background-color: #f8d7da; color: black; font-weight: bold')
@@ -303,23 +236,25 @@ def style_manovre(row):
 # --- INTERFACCIA ---
 st.title("⚓ Monitor Manovre Porto di Trieste")
 
-with st.sidebar:
-    st.header("🔧 Simulazione (Fuso Trieste)")
-    ora_default = get_ora_trieste()
-    ora_simulata = st.time_input("Ora", ora_default.time())
-    data_simulata = st.date_input("Data", ora_default.date())
-    dt_rif = datetime.combine(data_simulata, ora_simulata)
+# Sidebar
+st.sidebar.header("🔧 Simulazione")
+ora_simulata = st.sidebar.time_input("Ora", datetime.now().time())
+data_simulata = st.sidebar.date_input("Data", datetime.now().date())
+dt_rif = datetime.combine(data_simulata, ora_simulata)
 
 col_btn, col_info, col_sel = st.columns([1, 2, 2])
 
 with col_btn:
+    # PULSANTE CHE SCARICA
     if st.button("🔄 AGGIORNA SCARICANDO I DATI", type="primary"):
         aggiorna_dati()
 
+# Se è la prima volta che apro l'app, scarico automatico
 if st.session_state.dati_totali.empty and st.session_state.ultimo_aggiornamento is None:
     aggiorna_dati()
 
 with col_sel:
+    # RADIO CHE FILTRA SOLO (senza scaricare)
     scelta_vista = st.radio("Filtra per:", ["Turno Attuale", "Prossimo Turno"], horizontal=True)
 
 start, end, nome_turno = get_orari_turno(dt_rif, scelta_vista)
@@ -327,44 +262,48 @@ start, end, nome_turno = get_orari_turno(dt_rif, scelta_vista)
 with col_info:
     st.info(f"Turno: **{nome_turno}**\nFiltro: {start.strftime('%H:%M')} - {end.strftime('%H:%M')}")
     if st.session_state.ultimo_aggiornamento:
-        st.caption(f"Ultimo scaricamento: {st.session_state.ultimo_aggiornamento} (Ora TS)")
+        st.caption(f"Dati scaricati alle: {st.session_state.ultimo_aggiornamento}")
 
 st.divider()
 
-# --- VISUALIZZAZIONE ---
+# --- VISUALIZZAZIONE DATI (Dalla Memoria) ---
 df_total = st.session_state.dati_totali
 
 if not df_total.empty:
-    if 'ETA' in df_total.columns and 'ETD' in df_total.columns:
-        mask = ((df_total['ETA'] >= start) & (df_total['ETA'] <= end)) | ((df_total['ETD'] >= start) & (df_total['ETD'] <= end))
+    if 'ETB' in df_total.columns and 'ETD' in df_total.columns:
+        mask = ((df_total['ETB'] >= start) & (df_total['ETB'] <= end)) | ((df_total['ETD'] >= start) & (df_total['ETD'] <= end))
         df_filtrato = df_total[mask].copy()
     else:
         df_filtrato = pd.DataFrame()
     
+    # Calcolo Tipo Manovra e Ordinamento
     if not df_filtrato.empty:
         
         def processa_riga(row):
+            # Determina tipo manovra
             azioni = []
-            orari_rilevanti = []
+            orari_rilevanti = [] # Serve per l'ordinamento
             
-            if pd.notnull(row['ETA']) and start <= row['ETA'] <= end: 
+            if pd.notnull(row['ETB']) and start <= row['ETB'] <= end: 
                 azioni.append("ARRIVO")
-                orari_rilevanti.append(row['ETA'])
+                orari_rilevanti.append(row['ETB'])
                 
             if pd.notnull(row['ETD']) and start <= row['ETD'] <= end: 
                 azioni.append("PARTENZA")
                 orari_rilevanti.append(row['ETD'])
             
             tipo = " + ".join(azioni) if azioni else "-"
+            # Prende l'orario più presto tra quelli rilevanti per ordinare
             sort_key = min(orari_rilevanti) if orari_rilevanti else pd.NaT
             
             return pd.Series([tipo, sort_key])
 
         df_filtrato[['Tipo', 'SortKey']] = df_filtrato.apply(processa_riga, axis=1)
+        
+        # ORDINAMENTO TEMPORALE
         df_filtrato = df_filtrato.sort_values(by='SortKey')
         
-        # MOSTRA SOLO COLONNE UTILI
-        cols_desired = ['Terminal', 'Tipo', 'Vessel', 'ETA', 'ETD']
+        cols_desired = ['Terminal', 'Tipo', 'Vessel', 'ETB', 'ETD', 'Agent']
         for c in cols_desired:
             if c not in df_filtrato.columns: df_filtrato[c] = ""
                 
@@ -372,7 +311,7 @@ if not df_total.empty:
         
         st.dataframe(
             df_filtrato[cols_desired].style.apply(style_manovre, axis=1).format({
-                'ETA': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-",
+                'ETB': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-",
                 'ETD': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-"
             }),
             use_container_width=True,
@@ -383,16 +322,17 @@ if not df_total.empty:
 
     st.write("---")
     
+    # TABELLE COMPLETE (INFO DEBUG SPOSTATE QUI)
     c1, c2 = st.columns(2)
     with c1:
         with st.expander("Tabella Completa TMT"):
             st.dataframe(df_total[df_total['Terminal'].str.contains("TMT")])
     with c2:
         with st.expander("Tabella Completa SIOT"):
-            st.write(f"ℹ️ {st.session_state.debug_msg_tasco}")
+            st.write(f"ℹ️ {st.session_state.debug_msg_tasco}") # Messaggio file spostato qui
             st.dataframe(df_total[df_total['Terminal'].str.contains("SIOT")])
 else:
     if st.session_state.ultimo_aggiornamento:
-        st.warning("Nessun dato trovato sui siti.")
+        st.warning("Aggiornamento effettuato, ma non sono stati trovati dati validi.")
     else:
         st.info("Premi il pulsante per scaricare i dati.")
