@@ -50,18 +50,9 @@ def get_driver():
     service = Service("/usr/bin/chromedriver")
     return webdriver.Chrome(service=service, options=chrome_options)
 
-# --- LOGICA DI RICOSTRUZIONE (NO DUPLICATI) ---
+# --- LOGICA DI RICOSTRUZIONE ---
 def build_clean_df(source_data, terminal_name):
-    """
-    Costruisce un DataFrame da zero usando liste di dati.
-    Evita al 100% colonne duplicate.
-    source_data: dizionario con liste di valori {'Vessel': [], 'ETA': [], 'ETD': []}
-    """
-    # Creiamo il DF vergine
     df = pd.DataFrame()
-    
-    # Inseriamo i dati. Se le lunghezze non coincidono, pandas darebbe errore,
-    # quindi ci assicuriamo che tutto abbia la stessa lunghezza del vettore Vessel
     n_rows = len(source_data.get('Vessel', []))
     
     df['Terminal'] = [terminal_name] * n_rows
@@ -80,31 +71,21 @@ def fetch_tmt_data(driver):
         dfs = pd.read_html(driver.page_source, match="Vessel", flavor='html5lib')
         if len(dfs) > 0:
             raw_df = dfs[0]
-            # Pulizia nomi colonne grezze
             raw_df.columns = [str(c).strip() for c in raw_df.columns]
             
-            # Estrazione Dati Grezzi
             vessels = raw_df['Vessel'].tolist() if 'Vessel' in raw_df.columns else []
             
-            # Gestione ETA (da ETB)
             if 'ETB' in raw_df.columns:
                 etas = pd.to_datetime(raw_df['ETB'], dayfirst=True, errors='coerce').tolist()
             else:
                 etas = [pd.NaT] * len(vessels)
                 
-            # Gestione ETD
             if 'ETD' in raw_df.columns:
                 etds = pd.to_datetime(raw_df['ETD'], dayfirst=True, errors='coerce').tolist()
             else:
                 etds = [pd.NaT] * len(vessels)
             
-            # Costruzione Dizionario Dati
-            data_dict = {
-                'Vessel': vessels,
-                'ETA': etas,
-                'ETD': etds
-            }
-            
+            data_dict = {'Vessel': vessels, 'ETA': etas, 'ETD': etds}
             return build_clean_df(data_dict, 'TMT (Molo VII)')
             
     except Exception as e:
@@ -178,7 +159,6 @@ def fetch_tasco_data(driver):
             
         st.session_state.debug_msg_tasco = f"File elaborato: {os.path.basename(file_scaricato)}"
         
-        # LEGGI EXCEL
         raw_df = pd.read_excel(file_scaricato)
         try: os.remove(file_scaricato)
         except: pass
@@ -189,22 +169,14 @@ def fetch_tasco_data(driver):
         return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 
 def process_tasco_raw(raw_df):
-    # Drop righe vuote e pulizia nomi
     raw_df = raw_df.dropna(how='all')
     raw_df.columns = [str(c).replace("?","").replace(".","").strip() for c in raw_df.columns]
     
-    # 1. Estrai Vessels
-    # Cerca la colonna giusta
     v_col = None
     if 'Tanker Name' in raw_df.columns: v_col = 'Tanker Name'
     elif 'Tanker' in raw_df.columns: v_col = 'Tanker'
-    
-    if v_col:
-        vessels = raw_df[v_col].tolist()
-    else:
-        vessels = ["Sconosciuto"] * len(raw_df)
+    vessels = raw_df[v_col].tolist() if v_col else ["Sconosciuto"] * len(raw_df)
 
-    # Funzione parse date
     current_year = get_ora_trieste().year
     def parse_tasco_date(val):
         val = str(val).strip()
@@ -215,30 +187,20 @@ def process_tasco_raw(raw_df):
         except: pass
         return pd.to_datetime(val, errors='coerce')
 
-    # 2. Estrai ed Elabora ETA (da POB)
     etas = []
     if 'POB' in raw_df.columns:
         etas = raw_df['POB'].apply(parse_tasco_date).tolist()
     else:
         etas = [pd.NaT] * len(vessels)
 
-    # 3. Estrai ed Elabora ETD (da TLB) - 30 MINUTI
     etds = []
     if 'TLB' in raw_df.columns:
-        # Prima convertiamo
         temp_etds = raw_df['TLB'].apply(parse_tasco_date)
-        # Poi sottraiamo 30 min se la data è valida
         etds = [x - timedelta(minutes=30) if pd.notnull(x) else pd.NaT for x in temp_etds]
     else:
         etds = [pd.NaT] * len(vessels)
 
-    # Costruisci dizionario
-    data_dict = {
-        'Vessel': vessels,
-        'ETA': etas,
-        'ETD': etds
-    }
-    
+    data_dict = {'Vessel': vessels, 'ETA': etas, 'ETD': etds}
     return build_clean_df(data_dict, 'SIOT (Petroli)')
 
 # --- AGGIORNAMENTO ---
@@ -254,7 +216,6 @@ def aggiorna_dati():
         if not df_tasco.empty: frames.append(df_tasco)
         
         if frames:
-            # Qui non può fallire perché build_clean_df crea DF identici
             st.session_state.dati_totali = pd.concat(frames, ignore_index=True)
             st.session_state.ultimo_aggiornamento = get_ora_trieste().strftime("%H:%M:%S")
         else:
@@ -287,27 +248,32 @@ def get_orari_turno(ora_riferimento, tipo_visualizzazione):
     else:
         return prossimo_start, prossimo_end, "Prossimo Turno"
 
-# --- STILE ---
+# --- STILE E COLORI (Logic Updated) ---
 def style_manovre(row):
     styles = [''] * len(row.index)
+    
     def set_style(col_name, css):
         try:
+            # Trova l'indice della colonna
             idx = row.index.get_loc(col_name)
             styles[idx] = css
         except KeyError: pass
 
+    # Se la riga è un ARRIVO (verificato tramite la colonna nascosta Tipo)
+    # Nota: la colonna Tipo c'è nel dataframe anche se non la mostriamo
     if 'ARRIVO' in str(row['Tipo']):
-        set_style('Tipo', 'background-color: #d4edda; color: black; font-weight: bold')
-        set_style('ETA', 'background-color: #d4edda; color: #155724; font-weight: bold; border: 2px solid #155724')
+        # Evidenzia SOLO la cella ARRIVI in verde
+        set_style('ARRIVI', 'background-color: #d4edda; color: #155724; font-weight: bold; border: 2px solid #155724')
         
+    # Se la riga è una PARTENZA
     if 'PARTENZA' in str(row['Tipo']):
-        set_style('Tipo', 'background-color: #f8d7da; color: black; font-weight: bold')
-        set_style('ETD', 'background-color: #f8d7da; color: #721c24; font-weight: bold; border: 2px solid #721c24')
+        # Evidenzia SOLO la cella PARTENZE in rosso
+        set_style('PARTENZE', 'background-color: #f8d7da; color: #721c24; font-weight: bold; border: 2px solid #721c24')
         
     return styles
 
 # --- INTERFACCIA ---
-st.title("⚓ Monitor Manovre Porto di Trieste")
+st.title("⚓ Monitor Manovre Porto di Trieste ⚓") # Titolo aggiornato
 
 with st.sidebar:
     st.header("🔧 Simulazione (Fuso Trieste)")
@@ -333,7 +299,7 @@ start, end, nome_turno = get_orari_turno(dt_rif, scelta_vista)
 with col_info:
     st.info(f"Turno: **{nome_turno}**\nFiltro: {start.strftime('%H:%M')} - {end.strftime('%H:%M')}")
     if st.session_state.ultimo_aggiornamento:
-        st.caption(f"Ultimo scaricamento: {st.session_state.ultimo_aggiornamento} (Ora TS)")
+        st.caption(f"Ultimo scaricamento: {st.session_state.ultimo_aggiornamento} (Ora Locale)")
 
 st.divider()
 
@@ -349,6 +315,7 @@ if not df_total.empty:
     
     if not df_filtrato.empty:
         
+        # 1. Calcolo Tipo e SortKey (logica interna)
         def processa_riga(row):
             azioni = []
             orari_rilevanti = []
@@ -369,21 +336,29 @@ if not df_total.empty:
         df_filtrato[['Tipo', 'SortKey']] = df_filtrato.apply(processa_riga, axis=1)
         df_filtrato = df_filtrato.sort_values(by='SortKey')
         
-        cols_desired = ['Terminal', 'Tipo', 'Vessel', 'ETA', 'ETD']
-        # Fallback se mancano colonne
-        for c in cols_desired:
-            if c not in df_filtrato.columns: df_filtrato[c] = ""
-                
+        # 2. Rinomina Colonne per Visualizzazione (ETA->ARRIVI, ETD->PARTENZE)
+        df_view = df_filtrato.rename(columns={'ETA': 'ARRIVI', 'ETD': 'PARTENZE'})
+        
+        # 3. Definizione Colonne Visibili (Nascondiamo Tipo e SortKey)
+        cols_visible = ['Terminal', 'Vessel', 'ARRIVI', 'PARTENZE', 'Tipo'] # Teniamo Tipo per lo stile
+        for c in ['Terminal', 'Vessel', 'ARRIVI', 'PARTENZE']: # Riempie vuoti
+             if c not in df_view.columns: df_view[c] = ""
+        
         st.success(f"Trovate {len(df_filtrato)} manovre totali!")
         
-        st.dataframe(
-            df_filtrato[cols_desired].style.apply(style_manovre, axis=1).format({
-                'ETA': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-",
-                'ETD': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-"
-            }),
-            use_container_width=True,
-            hide_index=True
-        )
+        # 4. Applicazione Stile e Nascondimento Colonna Tipo
+        # Creiamo lo Styler object
+        styler = df_view[cols_visible].style.apply(style_manovre, axis=1).format({
+            'ARRIVI': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-",
+            'PARTENZE': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-"
+        })
+        
+        # Usiamo il metodo hide() per nascondere la colonna 'Tipo' e l'indice
+        styler.hide(axis="index")
+        styler.hide(subset=["Tipo"], axis="columns")
+        
+        st.dataframe(styler, use_container_width=True)
+        
     else:
         st.info("Nessuna manovra prevista nel turno.")
 
