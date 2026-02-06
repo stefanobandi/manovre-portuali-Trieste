@@ -9,7 +9,7 @@ import time as time_module
 # --- CONFIGURAZIONE ---
 st.set_page_config(page_title="Monitor Manovre TMT", layout="wide")
 
-# --- FUNZIONE SCRAPING CON SELENIUM (CORRETTA) ---
+# --- FUNZIONE SCRAPING CON SELENIUM ---
 def fetch_tmt_data_selenium():
     url = "https://www.trieste-marine-terminal.com/it"
     
@@ -21,8 +21,7 @@ def fetch_tmt_data_selenium():
     chrome_options.add_argument("--disable-gpu")
     
     try:
-        # MODIFICA FONDAMENTALE: Usiamo il driver di sistema
-        # Questo driver è installato grazie al file packages.txt e corrisponde esattamente alla versione di Chrome
+        # Usiamo il driver di sistema installato via packages.txt
         service = Service("/usr/bin/chromedriver")
         
         driver = webdriver.Chrome(service=service, options=chrome_options)
@@ -80,6 +79,34 @@ def get_orari_turno(ora_riferimento, tipo_visualizzazione):
     else:
         return prossimo_start, prossimo_end, "Prossimo Turno"
 
+# --- FUNZIONE DI STILE (COLORI) ---
+def style_manovre(row):
+    # Creiamo una lista di stili vuota lunga quanto le colonne
+    styles = [''] * len(row.index)
+    
+    # Helper per trovare l'indice della colonna
+    def set_style(col_name, css):
+        try:
+            idx = row.index.get_loc(col_name)
+            styles[idx] = css
+        except KeyError:
+            pass # Se la colonna non c'è, ignora
+
+    # Logica Colori
+    if 'ARRIVO' in str(row['Tipo']):
+        # Colora la cella del TIPO (Verde chiaro)
+        set_style('Tipo', 'background-color: #d4edda; color: black; font-weight: bold')
+        # Colora la cella ETB (Verde più scuro sul testo)
+        set_style('ETB', 'background-color: #d4edda; color: #155724; font-weight: bold; border: 2px solid #155724')
+        
+    if 'PARTENZA' in str(row['Tipo']):
+        # Colora la cella del TIPO (Rosso chiaro)
+        set_style('Tipo', 'background-color: #f8d7da; color: black; font-weight: bold')
+        # Colora la cella ETD (Rosso più scuro sul testo)
+        set_style('ETD', 'background-color: #f8d7da; color: #721c24; font-weight: bold; border: 2px solid #721c24')
+        
+    return styles
+
 # --- INTERFACCIA ---
 st.title("⚓ Monitor Manovre TMT (Live)")
 
@@ -111,7 +138,7 @@ with st.spinner("Scaricamento dati in corso..."):
     df = fetch_tmt_data_selenium()
 
 if not df.empty:
-    # 1. Filtro Temporale (Manovre nel turno)
+    # 1. Filtro Temporale
     mask = ((df['ETB'] >= start) & (df['ETB'] <= end)) | ((df['ETD'] >= start) & (df['ETD'] <= end))
     df_filtrato = df[mask].copy()
     
@@ -130,11 +157,13 @@ if not df.empty:
         colonne_finali = [c for c in colonne_utili if c in df_filtrato.columns]
         
         st.success(f"Trovate {len(df_filtrato)} manovre operative!")
+        
+        # Applicazione Stili
         st.dataframe(
-            df_filtrato[colonne_finali].style.applymap(
-                lambda x: 'background-color: #d4edda' if 'ARRIVO' in str(x) else ('background-color: #f8d7da' if 'PARTENZA' in str(x) else ''),
-                subset=['Tipo']
-            ),
+            df_filtrato[colonne_finali].style.apply(style_manovre, axis=1).format({
+                'ETB': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-",
+                'ETD': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-"
+            }),
             use_container_width=True,
             hide_index=True
         )
