@@ -67,7 +67,7 @@ def fetch_tmt_data(driver):
     url = "https://www.trieste-marine-terminal.com/it"
     try:
         driver.get(url)
-        time_module.sleep(3)
+        time_module.sleep(2)
         dfs = pd.read_html(driver.page_source, match="Vessel", flavor='html5lib')
         if len(dfs) > 0:
             raw_df = dfs[0]
@@ -94,19 +94,27 @@ def fetch_tmt_data(driver):
     return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 
 # --- 2. SCRAPING TASCO ---
-def fetch_tasco_data(driver):
+def fetch_tasco_data(driver, status_container=None):
+    """
+    driver: il browser
+    status_container: l'oggetto st.status per scrivere gli aggiornamenti
+    """
+    def log(msg):
+        if status_container:
+            status_container.write(msg)
+
     st.session_state.debug_msg_tasco = "" 
     if "tasco" not in st.secrets:
         st.error("⚠️ Configura i Secrets [tasco]!")
         return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 
     login_url = "https://tasco.tal-oil.com/ui/login"
-    st.toast("Accesso SIOT... (1/4)", icon="⛽")
     
     try:
         wait = WebDriverWait(driver, 20)
         
         # LOGIN
+        log("🔑 Accesso SIOT in corso...")
         driver.get(login_url)
         pass_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='password']")))
         try:
@@ -119,22 +127,25 @@ def fetch_tasco_data(driver):
         pass_input.clear()
         pass_input.send_keys(st.secrets["tasco"]["password"])
         pass_input.send_keys(Keys.RETURN)
-        time_module.sleep(5)
+        time_module.sleep(4)
+        log("✅ Login effettuato")
 
         # NAVIGAZIONE
-        st.toast("Navigazione...", icon="🖱️")
+        log("🧭 Navigazione menu TIMOS...")
         try:
             btn_timos = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Access to TIMOS')]")))
             btn_timos.click()
-            time_module.sleep(5)
+            time_module.sleep(3)
             btn_bb = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Terminal Basic Blackboard')]")))
             btn_bb.click()
-            time_module.sleep(8)
+            time_module.sleep(5)
+            log("✅ Tabella raggiunta")
         except:
+            log("❌ Errore navigazione menu")
             return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 
         # EXPORT
-        st.toast("Scarico Excel... (4/4)", icon="📥")
+        log("📥 Scaricamento file Excel...")
         for f in glob.glob("*.xls*"):
             try: os.remove(f)
             except: pass
@@ -143,6 +154,7 @@ def fetch_tasco_data(driver):
             btn_export = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Export')]")))
             btn_export.click()
         except:
+            log("❌ Tasto Export non trovato")
             return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
             
         # DOWNLOAD
@@ -155,8 +167,10 @@ def fetch_tasco_data(driver):
             time_module.sleep(1)
             
         if not file_scaricato:
+            log("❌ Timeout download")
             return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
-            
+        
+        log(f"✅ File ricevuto: {os.path.basename(file_scaricato)}")
         st.session_state.debug_msg_tasco = f"File elaborato: {os.path.basename(file_scaricato)}"
         
         raw_df = pd.read_excel(file_scaricato)
@@ -166,6 +180,7 @@ def fetch_tasco_data(driver):
         return process_tasco_raw(raw_df)
             
     except Exception as e:
+        log(f"❌ Errore critico TASCO: {str(e)}")
         return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 
 def process_tasco_raw(raw_df):
@@ -203,12 +218,21 @@ def process_tasco_raw(raw_df):
     data_dict = {'Vessel': vessels, 'ETA': etas, 'ETD': etds}
     return build_clean_df(data_dict, 'SIOT (Petroli)')
 
-# --- AGGIORNAMENTO ---
+# --- AGGIORNAMENTO CON STATUS CHECK ---
 def aggiorna_dati():
-    with st.spinner("Scaricamento dati in corso... (Attendi circa 30s)"):
+    # Usiamo st.status per il "Checklist" visuale
+    with st.status("Aggiornamento dati in corso...", expanded=True) as status:
+        st.write("🔌 Avvio Browser remoto...")
         driver = get_driver()
+        st.write("✅ Browser attivo")
+        
+        st.write("🛳️ Lettura dati TMT...")
         df_tmt = fetch_tmt_data(driver)
-        df_tasco = fetch_tasco_data(driver)
+        st.write(f"✅ TMT completato ({len(df_tmt)} navi trovate)")
+        
+        # Passiamo 'status' a tasco per aggiornamenti granulari
+        df_tasco = fetch_tasco_data(driver, status_container=status)
+        
         driver.quit()
 
         frames = []
@@ -220,6 +244,8 @@ def aggiorna_dati():
             st.session_state.ultimo_aggiornamento = get_ora_trieste().strftime("%H:%M:%S")
         else:
             st.session_state.dati_totali = pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
+            
+        status.update(label="Scaricamento Completato!", state="complete", expanded=False)
 
 # --- LOGICA TURNI ---
 def get_orari_turno(ora_riferimento, tipo_visualizzazione):
@@ -248,32 +274,55 @@ def get_orari_turno(ora_riferimento, tipo_visualizzazione):
     else:
         return prossimo_start, prossimo_end, "Prossimo Turno"
 
-# --- STILE E COLORI (Logic Updated) ---
+# --- STILE E COLORI (Aggiornato) ---
 def style_manovre(row):
     styles = [''] * len(row.index)
+    now = get_ora_trieste()
+    
+    # Colore GRIGIO per le righe passate
+    # Usiamo SortKey (che è l'orario della manovra) per decidere
+    is_past = False
+    if pd.notnull(row['SortKey']):
+        if row['SortKey'] < now:
+            is_past = True
+
+    # Stile base per la riga
+    base_style = 'color: #a0a0a0;' if is_past else '' # Grigio tenue se passato
     
     def set_style(col_name, css):
         try:
-            # Trova l'indice della colonna
             idx = row.index.get_loc(col_name)
-            styles[idx] = css
+            # Combiniamo lo stile base (grigio) con lo specifico
+            styles[idx] = f"{base_style} {css}"
         except KeyError: pass
 
-    # Se la riga è un ARRIVO (verificato tramite la colonna nascosta Tipo)
-    # Nota: la colonna Tipo c'è nel dataframe anche se non la mostriamo
+    # Applichiamo il grigio a tutte le celle di base
+    if is_past:
+        for i in range(len(styles)):
+            styles[i] = base_style
+
+    # Evidenziazioni specifiche (sovrascrivono il grigio per lo sfondo, ma mantengono il testo?)
+    # Se è passato, vogliamo sfondo tenue e testo grigio. 
+    # Se è futuro, sfondo forte e testo colorato.
+    
+    bg_arrivo = '#f2f9f4' if is_past else '#d4edda' # Verde sbiadito se passato
+    col_arrivo = '#a0a0a0' if is_past else '#155724' # Testo grigio se passato
+    border_arrivo = '#a0a0a0' if is_past else '#155724'
+
+    bg_partenza = '#fdf2f4' if is_past else '#f8d7da' # Rosso sbiadito se passato
+    col_partenza = '#a0a0a0' if is_past else '#721c24'
+    border_partenza = '#a0a0a0' if is_past else '#721c24'
+
     if 'ARRIVO' in str(row['Tipo']):
-        # Evidenzia SOLO la cella ARRIVI in verde
-        set_style('ARRIVI', 'background-color: #d4edda; color: #155724; font-weight: bold; border: 2px solid #155724')
+        set_style('ARRIVI', f'background-color: {bg_arrivo}; color: {col_arrivo}; font-weight: bold; border: 2px solid {border_arrivo}')
         
-    # Se la riga è una PARTENZA
     if 'PARTENZA' in str(row['Tipo']):
-        # Evidenzia SOLO la cella PARTENZE in rosso
-        set_style('PARTENZE', 'background-color: #f8d7da; color: #721c24; font-weight: bold; border: 2px solid #721c24')
+        set_style('PARTENZE', f'background-color: {bg_partenza}; color: {col_partenza}; font-weight: bold; border: 2px solid {border_partenza}')
         
     return styles
 
 # --- INTERFACCIA ---
-st.title("⚓ Monitor Manovre Porto di Trieste ⚓") # Titolo aggiornato
+st.title("⚓ Monitor Manovre Porto di Trieste ⚓")
 
 with st.sidebar:
     st.header("🔧 Simulazione (Fuso Trieste)")
@@ -297,9 +346,11 @@ with col_sel:
 start, end, nome_turno = get_orari_turno(dt_rif, scelta_vista)
 
 with col_info:
-    st.info(f"Turno: **{nome_turno}**\nFiltro: {start.strftime('%H:%M')} - {end.strftime('%H:%M')}")
+    # Aggiunta la data nel box informativo
+    data_format = dt_rif.strftime('%d/%m/%Y')
+    st.info(f"Turno: **{nome_turno}** del **{data_format}**\nFiltro: {start.strftime('%H:%M')} - {end.strftime('%H:%M')}")
     if st.session_state.ultimo_aggiornamento:
-        st.caption(f"Ultimo scaricamento: {st.session_state.ultimo_aggiornamento} (Ora Locale)")
+        st.caption(f"Ultimo scaricamento: {st.session_state.ultimo_aggiornamento}")
 
 st.divider()
 
@@ -315,7 +366,6 @@ if not df_total.empty:
     
     if not df_filtrato.empty:
         
-        # 1. Calcolo Tipo e SortKey (logica interna)
         def processa_riga(row):
             azioni = []
             orari_rilevanti = []
@@ -336,28 +386,29 @@ if not df_total.empty:
         df_filtrato[['Tipo', 'SortKey']] = df_filtrato.apply(processa_riga, axis=1)
         df_filtrato = df_filtrato.sort_values(by='SortKey')
         
-        # 2. Rinomina Colonne per Visualizzazione (ETA->ARRIVI, ETD->PARTENZE)
+        # Rinomina
         df_view = df_filtrato.rename(columns={'ETA': 'ARRIVI', 'ETD': 'PARTENZE'})
         
-        # 3. Definizione Colonne Visibili (Nascondiamo Tipo e SortKey)
-        cols_visible = ['Terminal', 'Vessel', 'ARRIVI', 'PARTENZE', 'Tipo'] # Teniamo Tipo per lo stile
-        for c in ['Terminal', 'Vessel', 'ARRIVI', 'PARTENZE']: # Riempie vuoti
+        # Colonne Finali (Tipo e SortKey servono per stile e ordinamento ma le nascondiamo dopo)
+        cols_visible = ['Terminal', 'Vessel', 'ARRIVI', 'PARTENZE', 'Tipo', 'SortKey']
+        for c in ['Terminal', 'Vessel', 'ARRIVI', 'PARTENZE']:
              if c not in df_view.columns: df_view[c] = ""
         
         st.success(f"Trovate {len(df_filtrato)} manovre totali!")
         
-        # 4. Applicazione Stile e Nascondimento Colonna Tipo
-        # Creiamo lo Styler object
-        styler = df_view[cols_visible].style.apply(style_manovre, axis=1).format({
-            'ARRIVI': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-",
-            'PARTENZE': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-"
-        })
-        
-        # Usiamo il metodo hide() per nascondere la colonna 'Tipo' e l'indice
-        styler.hide(axis="index")
-        styler.hide(subset=["Tipo"], axis="columns")
-        
-        st.dataframe(styler, use_container_width=True)
+        # Configurazione Stile e Colonne Nascoste
+        st.dataframe(
+            df_view[cols_visible].style.apply(style_manovre, axis=1).format({
+                'ARRIVI': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-",
+                'PARTENZE': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-"
+            }),
+            use_container_width=True,
+            column_config={
+                "Tipo": None,    # Nasconde la colonna Tipo
+                "SortKey": None  # Nasconde la colonna SortKey
+            },
+            hide_index=True
+        )
         
     else:
         st.info("Nessuna manovra prevista nel turno.")
