@@ -24,7 +24,8 @@ def get_ora_trieste():
 
 # --- SESSION STATE ---
 if 'dati_totali' not in st.session_state:
-    st.session_state.dati_totali = pd.DataFrame()
+    # Inizializziamo con un DataFrame vuoto MA con le colonne corrette per evitare errori
+    st.session_state.dati_totali = pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 if 'ultimo_aggiornamento' not in st.session_state:
     st.session_state.ultimo_aggiornamento = None
 if 'debug_msg_tasco' not in st.session_state:
@@ -51,44 +52,52 @@ def get_driver():
     service = Service("/usr/bin/chromedriver")
     return webdriver.Chrome(service=service, options=chrome_options)
 
-# --- FUNZIONE DI RICOSTRUZIONE SICURA ---
-def create_clean_dataframe(source_df, terminal_name, col_mapping):
+# --- FUNZIONE DI SANIFICAZIONE (LA CURA PER L'ERRORE) ---
+def sanitize_dataframe(df, terminal_name):
     """
-    Crea un nuovo DataFrame da zero copiando solo le colonne necessarie.
-    Evita qualsiasi errore di 'InvalidIndexError' dovuto a colonne duplicate.
+    Questa funzione prende un DataFrame 'sporco' e ne restituisce uno
+    perfettamente pulito e standardizzato, garantendo che non ci siano
+    errori durante l'unione (concat).
     """
-    # 1. Pulizia preliminare nomi colonne sorgente
-    source_df.columns = [str(c).strip() for c in source_df.columns]
+    # 1. Se il DF è vuoto o None, restituisci struttura vuota standard
+    if df is None or df.empty:
+        return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
     
-    # 2. Rimuovi duplicati alla fonte per sicurezza
-    source_df = source_df.loc[:, ~source_df.columns.duplicated()]
+    # 2. Pulizia nomi colonne
+    df.columns = [str(c).strip() for c in df.columns]
     
-    # 3. Rinomina le colonne sorgente secondo il mapping
-    # Esempio: {'ETB': 'ETA', 'Tanker': 'Vessel'}
-    source_df = source_df.rename(columns=col_mapping)
+    # 3. Rimuovi colonne duplicate all'origine (es. due colonne 'Vessel')
+    df = df.loc[:, ~df.columns.duplicated()]
     
-    # 4. Creazione DataFrame NUOVO E PULITO
+    # 4. Creiamo un NUOVO DataFrame pulito da zero
     clean_df = pd.DataFrame()
+    clean_df['Terminal'] = [terminal_name] * len(df)
     
-    # Copiamo i dati se la colonna esiste, altrimenti vuoto
-    if 'Vessel' in source_df.columns:
-        clean_df['Vessel'] = source_df['Vessel']
+    # 5. Copia sicura dei dati (Vessel)
+    # Cerchiamo la colonna Vessel o suoi alias
+    vessel_col = None
+    for alias in ['Vessel', 'Tanker Name', 'Tanker', 'Ship', 'Nave']:
+        if alias in df.columns:
+            vessel_col = alias
+            break
+    
+    if vessel_col:
+        clean_df['Vessel'] = df[vessel_col]
     else:
-        clean_df['Vessel'] = ""
-        
-    if 'ETA' in source_df.columns:
-        clean_df['ETA'] = source_df['ETA']
+        clean_df['Vessel'] = "Sconosciuta"
+
+    # 6. Copia sicura dei dati (ETA/ETD)
+    # Si aspetta che le colonne siano già state rinominate in ETA/ETD dalle funzioni di fetch
+    if 'ETA' in df.columns:
+        clean_df['ETA'] = df['ETA']
     else:
         clean_df['ETA'] = pd.NaT
         
-    if 'ETD' in source_df.columns:
-        clean_df['ETD'] = source_df['ETD']
+    if 'ETD' in df.columns:
+        clean_df['ETD'] = df['ETD']
     else:
         clean_df['ETD'] = pd.NaT
         
-    # Aggiungiamo il terminal
-    clean_df['Terminal'] = terminal_name
-    
     return clean_df
 
 # --- 1. SCRAPING TMT ---
@@ -100,27 +109,31 @@ def fetch_tmt_data(driver):
         dfs = pd.read_html(driver.page_source, match="Vessel", flavor='html5lib')
         if len(dfs) > 0:
             df = dfs[0]
+            # Rinomina ETB -> ETA subito
+            df.columns = [str(c).strip() for c in df.columns]
+            if 'ETB' in df.columns:
+                df = df.rename(columns={'ETB': 'ETA'})
             
-            # Parsing Date TMT
-            for col in ['ETB', 'ETD']: # Nota: TMT usa ETB, noi lo mapperemo a ETA
+            # Parsing date
+            for col in ['ETA', 'ETD']:
                 if col in df.columns:
                     df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
             
-            # RICOSTRUZIONE SICURA
-            # Mappiamo ETB -> ETA
-            mapping = {'ETB': 'ETA'}
-            return create_clean_dataframe(df, 'TMT (Molo VII)', mapping)
+            # Sanificazione
+            return sanitize_dataframe(df, 'TMT (Molo VII)')
             
     except Exception as e:
         print(f"Errore TMT: {e}")
-    return pd.DataFrame()
+    
+    # Ritorna DF vuoto standard se fallisce
+    return sanitize_dataframe(pd.DataFrame(), 'TMT (Molo VII)')
 
 # --- 2. SCRAPING TASCO ---
 def fetch_tasco_data(driver):
     st.session_state.debug_msg_tasco = ""
     if "tasco" not in st.secrets:
         st.error("⚠️ Configura i Secrets [tasco]!")
-        return pd.DataFrame()
+        return sanitize_dataframe(pd.DataFrame(), 'SIOT (Petroli)')
 
     login_url = "https://tasco.tal-oil.com/ui/login"
     
@@ -154,7 +167,7 @@ def fetch_tasco_data(driver):
             btn_bb.click()
             time_module.sleep(8)
         except:
-            return pd.DataFrame()
+            return sanitize_dataframe(pd.DataFrame(), 'SIOT (Petroli)')
 
         # EXPORT
         st.toast("Scarico Excel... (4/4)", icon="📥")
@@ -166,7 +179,7 @@ def fetch_tasco_data(driver):
             btn_export = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Export')]")))
             btn_export.click()
         except:
-            return pd.DataFrame()
+            return sanitize_dataframe(pd.DataFrame(), 'SIOT (Petroli)')
             
         # ATTESA FILE
         file_scaricato = None
@@ -178,7 +191,7 @@ def fetch_tasco_data(driver):
             time_module.sleep(1)
             
         if not file_scaricato:
-            return pd.DataFrame()
+            return sanitize_dataframe(pd.DataFrame(), 'SIOT (Petroli)')
             
         st.session_state.debug_msg_tasco = f"File elaborato: {os.path.basename(file_scaricato)}"
         
@@ -189,16 +202,17 @@ def fetch_tasco_data(driver):
         return process_tasco_df(df)
             
     except Exception as e:
-        return pd.DataFrame()
+        return sanitize_dataframe(pd.DataFrame(), 'SIOT (Petroli)')
 
 def process_tasco_df(df):
-    # Drop righe vuote
     df = df.dropna(how='all')
-    
-    # Pulizia nomi colonne "sporchi" (con ?, ., spazi)
     df.columns = [str(c).replace("?","").replace(".","").strip() for c in df.columns]
     
-    # --- PARSING DATE TASCO ---
+    # Rinomina specifica TASCO
+    # POB -> ETA, TLB -> ETD
+    rename_map = {'POB': 'ETA', 'TLB': 'ETD'}
+    df = df.rename(columns=rename_map)
+    
     current_year = get_ora_trieste().year
     
     def parse_tasco_date(val):
@@ -210,25 +224,15 @@ def process_tasco_df(df):
         except: pass
         return pd.to_datetime(val, errors='coerce')
 
-    # Applichiamo il parsing alle colonne originali (POB e TLB) se esistono
-    if 'POB' in df.columns: df['POB'] = df['POB'].apply(parse_tasco_date)
-    if 'TLB' in df.columns: df['TLB'] = df['TLB'].apply(parse_tasco_date)
-    
-    # --- MODIFICA 30 MINUTI ---
-    # Sottraiamo 30 minuti a TLB (che diventerà ETD) PRIMA di creare il DF pulito
-    if 'TLB' in df.columns:
-        df['TLB'] = df['TLB'] - timedelta(minutes=30)
-
-    # --- RICOSTRUZIONE SICURA ---
-    # Mappiamo POB -> ETA e TLB -> ETD
-    mapping = {
-        'POB': 'ETA', 
-        'TLB': 'ETD', 
-        'Tanker Name': 'Vessel', 
-        'Tanker': 'Vessel'
-    }
-    
-    return create_clean_dataframe(df, 'SIOT (Petroli)', mapping)
+    for col in ['ETA', 'ETD']:
+        if col in df.columns:
+            df[col] = df[col].apply(parse_tasco_date)
+            
+    # Sottrazione 30 min a ETD
+    if 'ETD' in df.columns:
+        df['ETD'] = df['ETD'] - timedelta(minutes=30)
+        
+    return sanitize_dataframe(df, 'SIOT (Petroli)')
 
 # --- AGGIORNAMENTO ---
 def aggiorna_dati():
@@ -239,16 +243,17 @@ def aggiorna_dati():
         driver.quit()
 
         frames = []
+        # Aggiungiamo solo se non sono vuoti (anche se sanitize ritorna struttura vuota, è meglio controllare)
         if not df_tmt.empty: frames.append(df_tmt)
         if not df_tasco.empty: frames.append(df_tasco)
         
         if frames:
-            # Ora che usiamo create_clean_dataframe, le colonne sono IDENTICHE e UNICHE.
-            # L'errore InvalidIndexError non può più verificarsi.
+            # Qui avveniva l'errore. Ora i frame sono garantiti identici dalla funzione sanitize_dataframe
             st.session_state.dati_totali = pd.concat(frames, ignore_index=True)
             st.session_state.ultimo_aggiornamento = get_ora_trieste().strftime("%H:%M:%S")
         else:
-            st.session_state.dati_totali = pd.DataFrame()
+            # Nessun dato trovato, ma resettiamo con la struttura corretta
+            st.session_state.dati_totali = pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 
 # --- LOGICA TURNI ---
 def get_orari_turno(ora_riferimento, tipo_visualizzazione):
