@@ -18,6 +18,36 @@ from selenium.webdriver.support import expected_conditions as EC
 st.set_page_config(page_title="Monitor Manovre Porto", layout="wide", initial_sidebar_state="collapsed")
 TZ_TRIESTE = pytz.timezone('Europe/Rome')
 
+# --- SISTEMA DI SICUREZZA (LOGIN) ---
+def check_password():
+    """Ritorna True se l'utente ha inserito la password corretta."""
+    if st.session_state.get("password_correct", False):
+        return True
+
+    st.markdown("## 🔒 Accesso Riservato Monitoraggio")
+    st.write("Inserisci la password per accedere ai dati portuali.")
+    pwd_input = st.text_input("Password:", type="password")
+    
+    if st.button("Accedi"):
+        # Controlla nei secrets [general] app_password
+        if "general" in st.secrets and pwd_input == st.secrets["general"]["app_password"]:
+            st.session_state["password_correct"] = True
+            st.rerun()
+        elif "general" not in st.secrets:
+            st.error("ERRORE CONFIGURAZIONE: Manca la sezione [general] nei Secrets.")
+        else:
+            st.error("Password errata.")
+            
+    return False
+
+# --- BLOCCO: SE NON SEI LOGGATO, STOP ---
+if not check_password():
+    st.stop()
+
+# =========================================================
+# APP VERA E PROPRIA (Caricata solo dopo il login)
+# =========================================================
+
 def get_ora_trieste():
     return datetime.now(TZ_TRIESTE).replace(tzinfo=None)
 
@@ -95,10 +125,6 @@ def fetch_tmt_data(driver):
 
 # --- 2. SCRAPING TASCO ---
 def fetch_tasco_data(driver, status_container=None):
-    """
-    driver: il browser
-    status_container: l'oggetto st.status per scrivere gli aggiornamenti
-    """
     def log(msg):
         if status_container:
             status_container.write(msg)
@@ -218,9 +244,8 @@ def process_tasco_raw(raw_df):
     data_dict = {'Vessel': vessels, 'ETA': etas, 'ETD': etds}
     return build_clean_df(data_dict, 'SIOT (Petroli)')
 
-# --- AGGIORNAMENTO CON STATUS CHECK ---
+# --- AGGIORNAMENTO ---
 def aggiorna_dati():
-    # Usiamo st.status per il "Checklist" visuale
     with st.status("Aggiornamento dati in corso...", expanded=True) as status:
         st.write("🔌 Avvio Browser remoto...")
         driver = get_driver()
@@ -230,7 +255,6 @@ def aggiorna_dati():
         df_tmt = fetch_tmt_data(driver)
         st.write(f"✅ TMT completato ({len(df_tmt)} navi trovate)")
         
-        # Passiamo 'status' a tasco per aggiornamenti granulari
         df_tasco = fetch_tasco_data(driver, status_container=status)
         
         driver.quit()
@@ -274,42 +298,33 @@ def get_orari_turno(ora_riferimento, tipo_visualizzazione):
     else:
         return prossimo_start, prossimo_end, "Prossimo Turno"
 
-# --- STILE E COLORI (Aggiornato) ---
+# --- STILE E COLORI ---
 def style_manovre(row):
     styles = [''] * len(row.index)
     now = get_ora_trieste()
     
-    # Colore GRIGIO per le righe passate
-    # Usiamo SortKey (che è l'orario della manovra) per decidere
     is_past = False
     if pd.notnull(row['SortKey']):
         if row['SortKey'] < now:
             is_past = True
 
-    # Stile base per la riga
-    base_style = 'color: #a0a0a0;' if is_past else '' # Grigio tenue se passato
+    base_style = 'color: #a0a0a0;' if is_past else '' 
     
     def set_style(col_name, css):
         try:
             idx = row.index.get_loc(col_name)
-            # Combiniamo lo stile base (grigio) con lo specifico
             styles[idx] = f"{base_style} {css}"
         except KeyError: pass
 
-    # Applichiamo il grigio a tutte le celle di base
     if is_past:
         for i in range(len(styles)):
             styles[i] = base_style
 
-    # Evidenziazioni specifiche (sovrascrivono il grigio per lo sfondo, ma mantengono il testo?)
-    # Se è passato, vogliamo sfondo tenue e testo grigio. 
-    # Se è futuro, sfondo forte e testo colorato.
-    
-    bg_arrivo = '#f2f9f4' if is_past else '#d4edda' # Verde sbiadito se passato
-    col_arrivo = '#a0a0a0' if is_past else '#155724' # Testo grigio se passato
+    bg_arrivo = '#f2f9f4' if is_past else '#d4edda'
+    col_arrivo = '#a0a0a0' if is_past else '#155724' 
     border_arrivo = '#a0a0a0' if is_past else '#155724'
 
-    bg_partenza = '#fdf2f4' if is_past else '#f8d7da' # Rosso sbiadito se passato
+    bg_partenza = '#fdf2f4' if is_past else '#f8d7da'
     col_partenza = '#a0a0a0' if is_past else '#721c24'
     border_partenza = '#a0a0a0' if is_past else '#721c24'
 
@@ -346,7 +361,6 @@ with col_sel:
 start, end, nome_turno = get_orari_turno(dt_rif, scelta_vista)
 
 with col_info:
-    # Aggiunta la data nel box informativo
     data_format = dt_rif.strftime('%d/%m/%Y')
     st.info(f"Turno: **{nome_turno}** del **{data_format}**\nFiltro: {start.strftime('%H:%M')} - {end.strftime('%H:%M')}")
     if st.session_state.ultimo_aggiornamento:
@@ -386,17 +400,14 @@ if not df_total.empty:
         df_filtrato[['Tipo', 'SortKey']] = df_filtrato.apply(processa_riga, axis=1)
         df_filtrato = df_filtrato.sort_values(by='SortKey')
         
-        # Rinomina
         df_view = df_filtrato.rename(columns={'ETA': 'ARRIVI', 'ETD': 'PARTENZE'})
         
-        # Colonne Finali (Tipo e SortKey servono per stile e ordinamento ma le nascondiamo dopo)
         cols_visible = ['Terminal', 'Vessel', 'ARRIVI', 'PARTENZE', 'Tipo', 'SortKey']
         for c in ['Terminal', 'Vessel', 'ARRIVI', 'PARTENZE']:
              if c not in df_view.columns: df_view[c] = ""
         
         st.success(f"Trovate {len(df_filtrato)} manovre totali!")
         
-        # Configurazione Stile e Colonne Nascoste
         st.dataframe(
             df_view[cols_visible].style.apply(style_manovre, axis=1).format({
                 'ARRIVI': lambda t: t.strftime("%d/%m %H:%M") if pd.notnull(t) else "-",
@@ -404,8 +415,8 @@ if not df_total.empty:
             }),
             use_container_width=True,
             column_config={
-                "Tipo": None,    # Nasconde la colonna Tipo
-                "SortKey": None  # Nasconde la colonna SortKey
+                "Tipo": None,
+                "SortKey": None
             },
             hide_index=True
         )
