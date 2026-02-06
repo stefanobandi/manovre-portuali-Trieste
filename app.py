@@ -51,6 +51,46 @@ def get_driver():
     service = Service("/usr/bin/chromedriver")
     return webdriver.Chrome(service=service, options=chrome_options)
 
+# --- FUNZIONE DI RICOSTRUZIONE SICURA ---
+def create_clean_dataframe(source_df, terminal_name, col_mapping):
+    """
+    Crea un nuovo DataFrame da zero copiando solo le colonne necessarie.
+    Evita qualsiasi errore di 'InvalidIndexError' dovuto a colonne duplicate.
+    """
+    # 1. Pulizia preliminare nomi colonne sorgente
+    source_df.columns = [str(c).strip() for c in source_df.columns]
+    
+    # 2. Rimuovi duplicati alla fonte per sicurezza
+    source_df = source_df.loc[:, ~source_df.columns.duplicated()]
+    
+    # 3. Rinomina le colonne sorgente secondo il mapping
+    # Esempio: {'ETB': 'ETA', 'Tanker': 'Vessel'}
+    source_df = source_df.rename(columns=col_mapping)
+    
+    # 4. Creazione DataFrame NUOVO E PULITO
+    clean_df = pd.DataFrame()
+    
+    # Copiamo i dati se la colonna esiste, altrimenti vuoto
+    if 'Vessel' in source_df.columns:
+        clean_df['Vessel'] = source_df['Vessel']
+    else:
+        clean_df['Vessel'] = ""
+        
+    if 'ETA' in source_df.columns:
+        clean_df['ETA'] = source_df['ETA']
+    else:
+        clean_df['ETA'] = pd.NaT
+        
+    if 'ETD' in source_df.columns:
+        clean_df['ETD'] = source_df['ETD']
+    else:
+        clean_df['ETD'] = pd.NaT
+        
+    # Aggiungiamo il terminal
+    clean_df['Terminal'] = terminal_name
+    
+    return clean_df
+
 # --- 1. SCRAPING TMT ---
 def fetch_tmt_data(driver):
     url = "https://www.trieste-marine-terminal.com/it"
@@ -60,32 +100,16 @@ def fetch_tmt_data(driver):
         dfs = pd.read_html(driver.page_source, match="Vessel", flavor='html5lib')
         if len(dfs) > 0:
             df = dfs[0]
-            # Pulizia nomi colonne
-            df.columns = [str(c).strip() for c in df.columns]
             
-            # Elimina colonne duplicate se presenti
-            df = df.loc[:, ~df.columns.duplicated()]
-            
-            # Rinomina ETB -> ETA
-            df = df.rename(columns={'ETB': 'ETA'})
-            
-            # Conversione Date
-            for col in ['ETA', 'ETD']:
+            # Parsing Date TMT
+            for col in ['ETB', 'ETD']: # Nota: TMT usa ETB, noi lo mapperemo a ETA
                 if col in df.columns:
                     df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
             
-            df['Terminal'] = 'TMT (Molo VII)'
-            
-            # PULIZIA FINALE: Restituisci SOLO le colonne che servono
-            # Questo evita l'errore InvalidIndexError
-            cols_to_keep = ['Terminal', 'Vessel', 'ETA', 'ETD']
-            
-            # Se manca qualche colonna, la creiamo vuota per non rompere il codice
-            for c in cols_to_keep:
-                if c not in df.columns:
-                    df[c] = pd.NaT if 'ET' in c else ""
-                    
-            return df[cols_to_keep]
+            # RICOSTRUZIONE SICURA
+            # Mappiamo ETB -> ETA
+            mapping = {'ETB': 'ETA'}
+            return create_clean_dataframe(df, 'TMT (Molo VII)', mapping)
             
     except Exception as e:
         print(f"Errore TMT: {e}")
@@ -168,18 +192,13 @@ def fetch_tasco_data(driver):
         return pd.DataFrame()
 
 def process_tasco_df(df):
+    # Drop righe vuote
     df = df.dropna(how='all')
     
-    # Pulizia nomi colonne
+    # Pulizia nomi colonne "sporchi" (con ?, ., spazi)
     df.columns = [str(c).replace("?","").replace(".","").strip() for c in df.columns]
     
-    # RIMUOVI COLONNE DUPLICATE (Fondamentale per correggere l'errore)
-    df = df.loc[:, ~df.columns.duplicated()]
-    
-    # MAPPATURA
-    rename_map = {'POB': 'ETA', 'TLB': 'ETD', 'Tanker Name': 'Vessel', 'Tanker': 'Vessel'}
-    df = df.rename(columns=rename_map)
-    
+    # --- PARSING DATE TASCO ---
     current_year = get_ora_trieste().year
     
     def parse_tasco_date(val):
@@ -191,24 +210,25 @@ def process_tasco_df(df):
         except: pass
         return pd.to_datetime(val, errors='coerce')
 
-    for col in ['ETA', 'ETD']:
-        if col in df.columns:
-            df[col] = df[col].apply(parse_tasco_date)
-            
-    # Sottrazione 30 minuti a ETD
-    if 'ETD' in df.columns:
-        df['ETD'] = df['ETD'] - timedelta(minutes=30)
+    # Applichiamo il parsing alle colonne originali (POB e TLB) se esistono
+    if 'POB' in df.columns: df['POB'] = df['POB'].apply(parse_tasco_date)
+    if 'TLB' in df.columns: df['TLB'] = df['TLB'].apply(parse_tasco_date)
+    
+    # --- MODIFICA 30 MINUTI ---
+    # Sottraiamo 30 minuti a TLB (che diventerà ETD) PRIMA di creare il DF pulito
+    if 'TLB' in df.columns:
+        df['TLB'] = df['TLB'] - timedelta(minutes=30)
 
-    df['Terminal'] = 'SIOT (Petroli)'
+    # --- RICOSTRUZIONE SICURA ---
+    # Mappiamo POB -> ETA e TLB -> ETD
+    mapping = {
+        'POB': 'ETA', 
+        'TLB': 'ETD', 
+        'Tanker Name': 'Vessel', 
+        'Tanker': 'Vessel'
+    }
     
-    # PULIZIA FINALE: Restituisci SOLO le colonne che servono
-    cols_to_keep = ['Terminal', 'Vessel', 'ETA', 'ETD']
-    
-    for c in cols_to_keep:
-        if c not in df.columns:
-            df[c] = pd.NaT if 'ET' in c else ""
-            
-    return df[cols_to_keep]
+    return create_clean_dataframe(df, 'SIOT (Petroli)', mapping)
 
 # --- AGGIORNAMENTO ---
 def aggiorna_dati():
@@ -223,7 +243,8 @@ def aggiorna_dati():
         if not df_tasco.empty: frames.append(df_tasco)
         
         if frames:
-            # Ora concat non dovrebbe fallire perché le colonne sono pulite e identiche
+            # Ora che usiamo create_clean_dataframe, le colonne sono IDENTICHE e UNICHE.
+            # L'errore InvalidIndexError non può più verificarsi.
             st.session_state.dati_totali = pd.concat(frames, ignore_index=True)
             st.session_state.ultimo_aggiornamento = get_ora_trieste().strftime("%H:%M:%S")
         else:
@@ -338,7 +359,6 @@ if not df_total.empty:
         df_filtrato[['Tipo', 'SortKey']] = df_filtrato.apply(processa_riga, axis=1)
         df_filtrato = df_filtrato.sort_values(by='SortKey')
         
-        # MOSTRA SOLO COLONNE UTILI (NO Agent)
         cols_desired = ['Terminal', 'Tipo', 'Vessel', 'ETA', 'ETD']
         for c in cols_desired:
             if c not in df_filtrato.columns: df_filtrato[c] = ""
@@ -361,11 +381,11 @@ if not df_total.empty:
     c1, c2 = st.columns(2)
     with c1:
         with st.expander("Tabella Completa TMT"):
-            st.dataframe(df_total[df_total['Terminal'] == 'TMT (Molo VII)'])
+            st.dataframe(df_total[df_total['Terminal'].str.contains("TMT")])
     with c2:
         with st.expander("Tabella Completa SIOT"):
             st.write(f"ℹ️ {st.session_state.debug_msg_tasco}")
-            st.dataframe(df_total[df_total['Terminal'] == 'SIOT (Petroli)'])
+            st.dataframe(df_total[df_total['Terminal'].str.contains("SIOT")])
 else:
     if st.session_state.ultimo_aggiornamento:
         st.warning("Nessun dato trovato sui siti.")
