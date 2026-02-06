@@ -4,7 +4,7 @@ from datetime import datetime, time, timedelta
 import os
 import glob
 import time as time_module
-import pytz # Libreria per il fuso orario
+import pytz 
 
 # Import Selenium components
 from selenium import webdriver
@@ -15,18 +15,14 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-# --- CONFIGURAZIONE E FUSO ORARIO ---
-# Sidebar nascosta di default (collapsed)
+# --- CONFIGURAZIONE ---
 st.set_page_config(page_title="Monitor Manovre Porto", layout="wide", initial_sidebar_state="collapsed")
-
-# Definiamo il fuso orario di Trieste
 TZ_TRIESTE = pytz.timezone('Europe/Rome')
 
 def get_ora_trieste():
-    """Restituisce l'ora corrente a Trieste senza info timezone (naive) per confronti facili"""
     return datetime.now(TZ_TRIESTE).replace(tzinfo=None)
 
-# --- GESTIONE DELLA MEMORIA (SESSION STATE) ---
+# --- SESSION STATE ---
 if 'dati_totali' not in st.session_state:
     st.session_state.dati_totali = pd.DataFrame()
 if 'ultimo_aggiornamento' not in st.session_state:
@@ -34,7 +30,7 @@ if 'ultimo_aggiornamento' not in st.session_state:
 if 'debug_msg_tasco' not in st.session_state:
     st.session_state.debug_msg_tasco = ""
 
-# --- FUNZIONE SETUP BROWSER ---
+# --- BROWSER ---
 def get_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless")
@@ -64,16 +60,33 @@ def fetch_tmt_data(driver):
         dfs = pd.read_html(driver.page_source, match="Vessel", flavor='html5lib')
         if len(dfs) > 0:
             df = dfs[0]
+            # Pulizia nomi colonne
             df.columns = [str(c).strip() for c in df.columns]
             
-            # Rinomina ETB -> ETA subito
+            # Elimina colonne duplicate se presenti
+            df = df.loc[:, ~df.columns.duplicated()]
+            
+            # Rinomina ETB -> ETA
             df = df.rename(columns={'ETB': 'ETA'})
             
+            # Conversione Date
             for col in ['ETA', 'ETD']:
                 if col in df.columns:
                     df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
-            df['Terminal'] = 'TMT (Molo VII)' 
-            return df
+            
+            df['Terminal'] = 'TMT (Molo VII)'
+            
+            # PULIZIA FINALE: Restituisci SOLO le colonne che servono
+            # Questo evita l'errore InvalidIndexError
+            cols_to_keep = ['Terminal', 'Vessel', 'ETA', 'ETD']
+            
+            # Se manca qualche colonna, la creiamo vuota per non rompere il codice
+            for c in cols_to_keep:
+                if c not in df.columns:
+                    df[c] = pd.NaT if 'ET' in c else ""
+                    
+            return df[cols_to_keep]
+            
     except Exception as e:
         print(f"Errore TMT: {e}")
     return pd.DataFrame()
@@ -156,11 +169,14 @@ def fetch_tasco_data(driver):
 
 def process_tasco_df(df):
     df = df.dropna(how='all')
+    
+    # Pulizia nomi colonne
     df.columns = [str(c).replace("?","").replace(".","").strip() for c in df.columns]
     
-    # MAPPATURA E RINOMINA
-    # POB -> ETA (Richiesta utente)
-    # TLB -> ETD
+    # RIMUOVI COLONNE DUPLICATE (Fondamentale per correggere l'errore)
+    df = df.loc[:, ~df.columns.duplicated()]
+    
+    # MAPPATURA
     rename_map = {'POB': 'ETA', 'TLB': 'ETD', 'Tanker Name': 'Vessel', 'Tanker': 'Vessel'}
     df = df.rename(columns=rename_map)
     
@@ -179,14 +195,22 @@ def process_tasco_df(df):
         if col in df.columns:
             df[col] = df[col].apply(parse_tasco_date)
             
-    # --- MODIFICA RICHIESTA: SOTTRARRE 30 MINUTI A ETD (ex TLB) ---
+    # Sottrazione 30 minuti a ETD
     if 'ETD' in df.columns:
         df['ETD'] = df['ETD'] - timedelta(minutes=30)
 
     df['Terminal'] = 'SIOT (Petroli)'
-    return df
+    
+    # PULIZIA FINALE: Restituisci SOLO le colonne che servono
+    cols_to_keep = ['Terminal', 'Vessel', 'ETA', 'ETD']
+    
+    for c in cols_to_keep:
+        if c not in df.columns:
+            df[c] = pd.NaT if 'ET' in c else ""
+            
+    return df[cols_to_keep]
 
-# --- FUNZIONE AGGIORNAMENTO ---
+# --- AGGIORNAMENTO ---
 def aggiorna_dati():
     with st.spinner("Scaricamento dati in corso... (Attendi circa 30s)"):
         driver = get_driver()
@@ -199,15 +223,14 @@ def aggiorna_dati():
         if not df_tasco.empty: frames.append(df_tasco)
         
         if frames:
+            # Ora concat non dovrebbe fallire perché le colonne sono pulite e identiche
             st.session_state.dati_totali = pd.concat(frames, ignore_index=True)
-            # Salviamo l'orario in formato stringa
             st.session_state.ultimo_aggiornamento = get_ora_trieste().strftime("%H:%M:%S")
         else:
             st.session_state.dati_totali = pd.DataFrame()
 
 # --- LOGICA TURNI ---
 def get_orari_turno(ora_riferimento, tipo_visualizzazione):
-    # Assicuriamoci che l'ora di riferimento non abbia timezone per i confronti
     if ora_riferimento.tzinfo is not None:
         ora_riferimento = ora_riferimento.replace(tzinfo=None)
         
@@ -233,7 +256,7 @@ def get_orari_turno(ora_riferimento, tipo_visualizzazione):
     else:
         return prossimo_start, prossimo_end, "Prossimo Turno"
 
-# --- STILE E COLORI ---
+# --- STILE ---
 def style_manovre(row):
     styles = [''] * len(row.index)
     def set_style(col_name, css):
@@ -244,7 +267,6 @@ def style_manovre(row):
 
     if 'ARRIVO' in str(row['Tipo']):
         set_style('Tipo', 'background-color: #d4edda; color: black; font-weight: bold')
-        # Ora usiamo ETA invece di ETB
         set_style('ETA', 'background-color: #d4edda; color: #155724; font-weight: bold; border: 2px solid #155724')
         
     if 'PARTENZA' in str(row['Tipo']):
@@ -256,10 +278,8 @@ def style_manovre(row):
 # --- INTERFACCIA ---
 st.title("⚓ Monitor Manovre Porto di Trieste")
 
-# Sidebar (Nascosta)
 with st.sidebar:
     st.header("🔧 Simulazione (Fuso Trieste)")
-    # Simuliamo usando l'ora italiana
     ora_default = get_ora_trieste()
     ora_simulata = st.time_input("Ora", ora_default.time())
     data_simulata = st.date_input("Data", ora_default.date())
@@ -271,7 +291,6 @@ with col_btn:
     if st.button("🔄 AGGIORNA SCARICANDO I DATI", type="primary"):
         aggiorna_dati()
 
-# Primo avvio automatico
 if st.session_state.dati_totali.empty and st.session_state.ultimo_aggiornamento is None:
     aggiorna_dati()
 
@@ -303,12 +322,10 @@ if not df_total.empty:
             azioni = []
             orari_rilevanti = []
             
-            # Controllo ETA
             if pd.notnull(row['ETA']) and start <= row['ETA'] <= end: 
                 azioni.append("ARRIVO")
                 orari_rilevanti.append(row['ETA'])
                 
-            # Controllo ETD
             if pd.notnull(row['ETD']) and start <= row['ETD'] <= end: 
                 azioni.append("PARTENZA")
                 orari_rilevanti.append(row['ETD'])
@@ -319,11 +336,9 @@ if not df_total.empty:
             return pd.Series([tipo, sort_key])
 
         df_filtrato[['Tipo', 'SortKey']] = df_filtrato.apply(processa_riga, axis=1)
-        
-        # Ordina per orario manovra
         df_filtrato = df_filtrato.sort_values(by='SortKey')
         
-        # COLONNE DA MOSTRARE (ETA al posto di ETB, niente Agent)
+        # MOSTRA SOLO COLONNE UTILI (NO Agent)
         cols_desired = ['Terminal', 'Tipo', 'Vessel', 'ETA', 'ETD']
         for c in cols_desired:
             if c not in df_filtrato.columns: df_filtrato[c] = ""
@@ -346,11 +361,11 @@ if not df_total.empty:
     c1, c2 = st.columns(2)
     with c1:
         with st.expander("Tabella Completa TMT"):
-            st.dataframe(df_total[df_total['Terminal'].str.contains("TMT")])
+            st.dataframe(df_total[df_total['Terminal'] == 'TMT (Molo VII)'])
     with c2:
         with st.expander("Tabella Completa SIOT"):
             st.write(f"ℹ️ {st.session_state.debug_msg_tasco}")
-            st.dataframe(df_total[df_total['Terminal'].str.contains("SIOT")])
+            st.dataframe(df_total[df_total['Terminal'] == 'SIOT (Petroli)'])
 else:
     if st.session_state.ultimo_aggiornamento:
         st.warning("Nessun dato trovato sui siti.")
