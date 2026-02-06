@@ -18,6 +18,9 @@ def get_driver():
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
+    # Imposta una dimensione finestra fissa per evitare layout mobili
+    chrome_options.add_argument("--window-size=1920,1080")
+    
     service = Service("/usr/bin/chromedriver")
     return webdriver.Chrome(service=service, options=chrome_options)
 
@@ -34,17 +37,18 @@ def fetch_tmt_data(driver):
             for col in ['ETB', 'ETD']:
                 if col in df.columns:
                     df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
-            df['Terminal'] = 'TMT (Molo VII)' # Aggiungiamo etichetta
+            df['Terminal'] = 'TMT (Molo VII)' 
             return df
     except Exception as e:
-        st.error(f"Errore TMT: {e}")
+        # In produzione silenziamo l'errore per non spaventare, o usiamo st.error per debug
+        print(f"Errore TMT: {e}")
     return pd.DataFrame()
 
 # --- 2. SCRAPING TASCO (Petroliere - SIOT) ---
 def fetch_tasco_data(driver):
-    # Verifica credenziali
+    # Verifica presenza credenziali
     if "tasco" not in st.secrets:
-        st.warning("⚠️ Credenziali TASCO non trovate nei Secrets. Configurale su Streamlit Cloud.")
+        st.error("⚠️ Configura i Secrets di Streamlit con [tasco] username e password.")
         return pd.DataFrame()
 
     login_url = "https://tasco.tal-oil.com/ui/login"
@@ -53,30 +57,41 @@ def fetch_tasco_data(driver):
     try:
         # FASE 1: LOGIN
         driver.get(login_url)
-        time_module.sleep(3) # Attesa caricamento form
+        time_module.sleep(5) # Aspettiamo bene che la pagina carichi
         
-        # Cerchiamo i campi username e password (ipotesi standard id o name)
-        # Nota: Se fallisce qui, dovremo ispezionare l'HTML della pagina login
+        # --- NUOVA STRATEGIA DI SELEZIONE ---
+        # Invece di cercare per nome, cerchiamo per "TIPO" di campo.
+        # Cerchiamo il campo password (che è unico)
+        pass_input = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
+        
+        # Cerchiamo il campo testo generico (che di solito è lo username/email)
+        # Proviamo a cercare un input di tipo text o email
         try:
-            user_input = driver.find_element(By.NAME, "username") # Proviamo name="username"
-            pass_input = driver.find_element(By.NAME, "password")
-        except:
-            # Fallback se usano ID diversi
             user_input = driver.find_element(By.CSS_SELECTOR, "input[type='text']")
-            pass_input = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
+        except:
+            # Se non trova text, prova email
+            user_input = driver.find_element(By.CSS_SELECTOR, "input[type='email']")
 
+        # Inserimento dati
+        user_input.clear()
         user_input.send_keys(st.secrets["tasco"]["username"])
+        
+        pass_input.clear()
         pass_input.send_keys(st.secrets["tasco"]["password"])
-        pass_input.send_keys(Keys.RETURN) # Preme Invio
         
-        time_module.sleep(5) # Attesa post-login
+        # Invio
+        pass_input.send_keys(Keys.RETURN)
         
-        # FASE 2: NAVIGAZIONE ALLA TABELLA
+        # Attendiamo il login
+        time_module.sleep(6) 
+        
+        # FASE 2: NAVIGAZIONE DIRETTA ALLA TABELLA
+        # Andiamo dritti al link della tabella, saltando menu grafici
         driver.get(target_url)
-        time_module.sleep(5) # Attesa caricamento tabella
+        time_module.sleep(6) # Attesa caricamento dati tabella
         
         # FASE 3: LETTURA DATI
-        # Cerchiamo tabella con colonna POB
+        # Cerchiamo tabella con colonna POB (Pilot On Board - Arrivo)
         dfs = pd.read_html(driver.page_source, match="POB", flavor='html5lib')
         
         if len(dfs) > 0:
@@ -84,8 +99,7 @@ def fetch_tasco_data(driver):
             df.columns = [str(c).strip() for c in df.columns]
             
             # NORMALIZZAZIONE: Rinominiamo le colonne TASCO per farle uguali a TMT
-            # POB (Pilot on Board) -> ETB (Arrivo)
-            # TLB (Tug Line Break) -> ETD (Partenza)
+            # POB = Arrivo (ETB), TLB = Partenza (ETD)
             rename_map = {'POB': 'ETB', 'TLB': 'ETD'}
             df = df.rename(columns=rename_map)
             
@@ -95,13 +109,22 @@ def fetch_tasco_data(driver):
                     df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
             
             df['Terminal'] = 'SIOT (Petroli)'
+            
+            # Aggiungiamo colonne vuote se mancano per uniformità con TMT
+            if 'Vessel' not in df.columns:
+                # A volte si chiama "Vessel Name" o "Nave"
+                for poss_name in ['Vessel Name', 'Ship', 'Nave']:
+                    if poss_name in df.columns:
+                        df = df.rename(columns={poss_name: 'Vessel'})
+                        break
+            
             return df
         else:
-            # st.warning("Login TASCO ok, ma nessuna tabella trovata.")
             return pd.DataFrame()
             
     except Exception as e:
-        # st.error(f"Errore TASCO (verificare login): {e}")
+        # Se fallisce, stampiamo l'errore per capire cosa non va
+        st.warning(f"Errore tecnico TASCO: {str(e)}")
         return pd.DataFrame()
 
 # --- LOGICA TURNI ---
@@ -176,13 +199,13 @@ st.divider()
 with st.spinner("Connessione ai terminal TMT e SIOT in corso..."):
     driver = get_driver()
     
-    # Peschiamo da entrambe le fonti
+    # Eseguiamo scraping parallelo (sequenziale nel codice)
     df_tmt = fetch_tmt_data(driver)
     df_tasco = fetch_tasco_data(driver)
     
     driver.quit()
 
-    # Uniamo i dati (se presenti)
+    # Unione Dati
     frames = []
     if not df_tmt.empty: frames.append(df_tmt)
     if not df_tasco.empty: frames.append(df_tasco)
@@ -195,25 +218,30 @@ with st.spinner("Connessione ai terminal TMT e SIOT in corso..."):
 # --- VISUALIZZAZIONE ---
 if not df_total.empty:
     # 1. Filtro Temporale Unificato
-    mask = ((df_total['ETB'] >= start) & (df_total['ETB'] <= end)) | ((df_total['ETD'] >= start) & (df_total['ETD'] <= end))
-    df_filtrato = df_total[mask].copy()
+    # Controlliamo che le colonne esistano prima di filtrare
+    if 'ETB' in df_total.columns and 'ETD' in df_total.columns:
+        mask = ((df_total['ETB'] >= start) & (df_total['ETB'] <= end)) | ((df_total['ETD'] >= start) & (df_total['ETD'] <= end))
+        df_filtrato = df_total[mask].copy()
+    else:
+        df_filtrato = pd.DataFrame() # Se mancano le colonne chiave, vuoto
     
     # 2. Logica Azione
     def get_azione(row):
         azioni = []
-        if pd.notnull(row['ETB']) and start <= row['ETB'] <= end: azioni.append("ARRIVO")
-        if pd.notnull(row['ETD']) and start <= row['ETD'] <= end: azioni.append("PARTENZA")
+        # Usa pd.notnull per evitare errori su date vuote
+        if 'ETB' in row and pd.notnull(row['ETB']) and start <= row['ETB'] <= end: azioni.append("ARRIVO")
+        if 'ETD' in row and pd.notnull(row['ETD']) and start <= row['ETD'] <= end: azioni.append("PARTENZA")
         return " + ".join(azioni) if azioni else "-"
         
     if not df_filtrato.empty:
         df_filtrato['Tipo'] = df_filtrato.apply(get_azione, axis=1)
         
-        # Colonne da mostrare (cerchiamo di uniformare)
-        # Nota: TASCO potrebbe non avere "Agent" o "Viaggio", quindi usiamo col. intersezione o riempiamo vuoti
+        # Preparazione colonne finali
         cols_desired = ['Terminal', 'Tipo', 'Vessel', 'ETB', 'ETD', 'Agent']
+        # Assicuriamoci che esistano tutte nel dataframe finale
         for c in cols_desired:
             if c not in df_filtrato.columns:
-                df_filtrato[c] = "" # Crea colonna vuota se manca
+                df_filtrato[c] = ""
                 
         st.success(f"Trovate {len(df_filtrato)} manovre totali (Container + Petroli)!")
         
@@ -229,6 +257,7 @@ if not df_total.empty:
         st.info("Nessuna manovra prevista nel turno per nessuno dei terminal.")
 
     # TABELLE COMPLETE IN BASSO
+    st.write("---")
     c1, c2 = st.columns(2)
     with c1:
         with st.expander("Tabella Completa TMT"):
@@ -236,7 +265,7 @@ if not df_total.empty:
     with c2:
         with st.expander("Tabella Completa SIOT (TASCO)"):
             if df_tasco.empty:
-                st.warning("Nessun dato SIOT o errore Login (Verifica Secrets).")
+                st.warning("Nessun dato SIOT visualizzabile.")
             else:
                 st.dataframe(df_tasco)
 else:
