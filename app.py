@@ -343,10 +343,10 @@ def genera_opzioni_future(ora_riferimento):
         
         # Definiamo l'etichetta
         if start.hour == 8:
-            tipo = "08-20" # Diurno
+            tipo = "Diurno (08-20)" 
             data_str = start.strftime('%d/%m/%Y')
-        else: # start.hour == 20
-            tipo = "20-08" # Notturno
+        else: 
+            tipo = "Notturno (20-08)"
             data_str = start.strftime('%d/%m/%Y')
             
         label = f"{tipo} del {data_str}"
@@ -398,9 +398,6 @@ def style_manovre(row):
 st.title("⚓ Monitor Manovre Porto di Trieste 🚢")
 st.markdown("I dati vengono prelevati dai siti web TMT e Tasco pertanto includono solo movimenti container e petroliere.")
 
-# Rimossa Sidebar completamente
-
-# Layout controlli in alto
 col_btn, col_sel_mode, col_sel_drop = st.columns([1, 1, 2])
 
 with col_btn:
@@ -426,8 +423,8 @@ banner_text = ""
 if modo_selezione == "Turno attuale":
     # Calcolo automatico
     start_filter, end_filter, label_turno = calcola_turno_attuale(ora_reale)
-    # Banner: [Turno attuale] [diurno/notturno...]
-    banner_text = f"**[Turno attuale] {label_turno}**"
+    # Banner SENZA parentesi quadre
+    banner_text = f"**Turno attuale - {label_turno}**"
     
 else:
     # Modo "Turno futuro"
@@ -439,7 +436,8 @@ else:
     
     if scelta_futura:
         start_filter, end_filter = opzioni_future[scelta_futura]
-        banner_text = f"**[Turno futuro] {scelta_futura}**"
+        # Banner SENZA parentesi quadre
+        banner_text = f"**Turno futuro - {scelta_futura}**"
 
 # --- BANNER INFORMATIVO ---
 st.info(banner_text)
