@@ -29,7 +29,6 @@ def check_password():
     pwd_input = st.text_input("Password:", type="password")
     
     if st.button("Accedi"):
-        # Controlla nei secrets [general] app_password
         if "general" in st.secrets and pwd_input == st.secrets["general"]["app_password"]:
             st.session_state["password_correct"] = True
             st.rerun()
@@ -40,7 +39,6 @@ def check_password():
             
     return False
 
-# --- BLOCCO: SE NON SEI LOGGATO, STOP ---
 if not check_password():
     st.stop()
 
@@ -82,24 +80,15 @@ def get_driver():
 
 # --- LOGICA DI RICOSTRUZIONE ---
 def build_clean_df(source_data, terminal_input):
-    """
-    Costruisce un DataFrame pulito.
-    terminal_input: può essere una stringa fissa (es. "TMT") 
-                    oppure una LISTA di stringhe (es. ["SIOT (1)", "SIOT (2)"])
-    """
     df = pd.DataFrame()
     n_rows = len(source_data.get('Vessel', []))
     
-    # Gestione Terminal (Stringa fissa o Lista variabile)
     if isinstance(terminal_input, list):
-        # Se è una lista, assicuriamoci che abbia la lunghezza giusta
         if len(terminal_input) == n_rows:
             df['Terminal'] = terminal_input
         else:
-            # Fallback in caso di errore di lunghezza (non dovrebbe accadere)
             df['Terminal'] = ["SIOT (N.D.)"] * n_rows
     else:
-        # Se è una stringa unica (caso TMT)
         df['Terminal'] = [terminal_input] * n_rows
 
     df['Vessel'] = source_data.get('Vessel', [""] * n_rows)
@@ -229,38 +218,30 @@ def process_tasco_raw(raw_df):
     raw_df = raw_df.dropna(how='all')
     raw_df.columns = [str(c).replace("?","").replace(".","").strip() for c in raw_df.columns]
     
-    # --- GESTIONE NOME NAVE ---
     v_col = None
     if 'Tanker Name' in raw_df.columns: v_col = 'Tanker Name'
     elif 'Tanker' in raw_df.columns: v_col = 'Tanker'
     vessels = raw_df[v_col].tolist() if v_col else ["Sconosciuto"] * len(raw_df)
 
-    # --- GESTIONE TERMINAL / BERTH (Nuovo) ---
-    # Cerchiamo la colonna Berth o Pontile
     b_col = None
     if 'Berth' in raw_df.columns: b_col = 'Berth'
     elif 'Pontile' in raw_df.columns: b_col = 'Pontile'
     
     terminal_labels = []
     if b_col:
-        # Funzione per pulire il numero ormeggio (da 1.0 a 1, o gestire vuoti)
         def format_berth(val):
             if pd.isna(val) or str(val).strip() == "":
                 return "N.D."
             try:
-                # Tenta di convertire float in int (es 1.0 -> 1)
                 return str(int(float(val)))
             except:
                 return str(val)
 
         berth_values = raw_df[b_col].apply(format_berth).tolist()
-        # Creiamo la lista: SIOT (1), SIOT (2)...
         terminal_labels = [f"SIOT ({b})" for b in berth_values]
     else:
-        # Se non esiste la colonna Berth
         terminal_labels = ["SIOT (N.D.)"] * len(vessels)
 
-    # --- GESTIONE DATE ---
     current_year = get_ora_trieste().year
     def parse_tasco_date(val):
         val = str(val).strip()
@@ -285,8 +266,6 @@ def process_tasco_raw(raw_df):
         etds = [pd.NaT] * len(vessels)
 
     data_dict = {'Vessel': vessels, 'ETA': etas, 'ETD': etds}
-    
-    # Passiamo la lista dinamica dei terminal invece della stringa fissa
     return build_clean_df(data_dict, terminal_labels)
 
 # --- AGGIORNAMENTO ---
@@ -382,15 +361,21 @@ def style_manovre(row):
     return styles
 
 # --- INTERFACCIA ---
-# TITOLO AGGIORNATO CON ANCORA E NAVE
 st.title("⚓ Monitor Manovre Porto di Trieste 🚢")
+# Sottotitolo richiesto
+st.markdown("I dati vengono prelevati dai siti web TMT e Tasco pertanto includono solo movimenti container e petroliere.")
 
 with st.sidebar:
     st.header("🔧 Simulazione (Fuso Trieste)")
-    ora_default = get_ora_trieste()
-    ora_simulata = st.time_input("Ora", ora_default.time())
-    data_simulata = st.date_input("Data", ora_default.date())
-    dt_rif = datetime.combine(data_simulata, ora_simulata)
+    # Rimosso input orario, mostra solo orario attuale (non modificabile)
+    ora_corrente_ts = get_ora_trieste()
+    st.write(f"🕒 Ora attuale: **{ora_corrente_ts.strftime('%H:%M')}**")
+    
+    # Selettore Data (modificabile)
+    data_simulata = st.date_input("Data", ora_corrente_ts.date())
+    
+    # Combina data scelta + ora reale corrente
+    dt_rif = datetime.combine(data_simulata, ora_corrente_ts.time())
 
 col_btn, col_info, col_sel = st.columns([1, 2, 2])
 
@@ -402,13 +387,19 @@ if st.session_state.dati_totali.empty and st.session_state.ultimo_aggiornamento 
     aggiorna_dati()
 
 with col_sel:
-    scelta_vista = st.radio("Filtra per:", ["Turno Attuale", "Prossimo Turno"], horizontal=True)
+    # Opzioni del radio button con maiuscole/minuscole coerenti
+    scelta_vista = st.radio("Filtra per:", ["Turno attuale", "Prossimo turno"], horizontal=True)
 
 start, end, nome_turno = get_orari_turno(dt_rif, scelta_vista)
 
 with col_info:
-    data_format = dt_rif.strftime('%d/%m/%Y')
-    st.info(f"Turno: **{nome_turno}** del **{data_format}**\nFiltro: {start.strftime('%H:%M')} - {end.strftime('%H:%M')}")
+    # Costruzione stringa Banner personalizzata
+    # Esempio: "Turno attuale - Notturno (20-08) del 07/02/2026"
+    data_turno_str = start.strftime('%d/%m/%Y')
+    banner_text = f"**{scelta_vista} - {nome_turno} del {data_turno_str}**"
+    
+    st.info(f"{banner_text}")
+    
     if st.session_state.ultimo_aggiornamento:
         st.caption(f"Ultimo scaricamento: {st.session_state.ultimo_aggiornamento}")
 
