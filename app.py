@@ -45,7 +45,7 @@ if not check_password():
     st.stop()
 
 # =========================================================
-# APP VERA E PROPRIA (Caricata solo dopo il login)
+# APP VERA E PROPRIA
 # =========================================================
 
 def get_ora_trieste():
@@ -81,11 +81,27 @@ def get_driver():
     return webdriver.Chrome(service=service, options=chrome_options)
 
 # --- LOGICA DI RICOSTRUZIONE ---
-def build_clean_df(source_data, terminal_name):
+def build_clean_df(source_data, terminal_input):
+    """
+    Costruisce un DataFrame pulito.
+    terminal_input: può essere una stringa fissa (es. "TMT") 
+                    oppure una LISTA di stringhe (es. ["SIOT (1)", "SIOT (2)"])
+    """
     df = pd.DataFrame()
     n_rows = len(source_data.get('Vessel', []))
     
-    df['Terminal'] = [terminal_name] * n_rows
+    # Gestione Terminal (Stringa fissa o Lista variabile)
+    if isinstance(terminal_input, list):
+        # Se è una lista, assicuriamoci che abbia la lunghezza giusta
+        if len(terminal_input) == n_rows:
+            df['Terminal'] = terminal_input
+        else:
+            # Fallback in caso di errore di lunghezza (non dovrebbe accadere)
+            df['Terminal'] = ["SIOT (N.D.)"] * n_rows
+    else:
+        # Se è una stringa unica (caso TMT)
+        df['Terminal'] = [terminal_input] * n_rows
+
     df['Vessel'] = source_data.get('Vessel', [""] * n_rows)
     df['ETA'] = source_data.get('ETA', [pd.NaT] * n_rows)
     df['ETD'] = source_data.get('ETD', [pd.NaT] * n_rows)
@@ -213,11 +229,38 @@ def process_tasco_raw(raw_df):
     raw_df = raw_df.dropna(how='all')
     raw_df.columns = [str(c).replace("?","").replace(".","").strip() for c in raw_df.columns]
     
+    # --- GESTIONE NOME NAVE ---
     v_col = None
     if 'Tanker Name' in raw_df.columns: v_col = 'Tanker Name'
     elif 'Tanker' in raw_df.columns: v_col = 'Tanker'
     vessels = raw_df[v_col].tolist() if v_col else ["Sconosciuto"] * len(raw_df)
 
+    # --- GESTIONE TERMINAL / BERTH (Nuovo) ---
+    # Cerchiamo la colonna Berth o Pontile
+    b_col = None
+    if 'Berth' in raw_df.columns: b_col = 'Berth'
+    elif 'Pontile' in raw_df.columns: b_col = 'Pontile'
+    
+    terminal_labels = []
+    if b_col:
+        # Funzione per pulire il numero ormeggio (da 1.0 a 1, o gestire vuoti)
+        def format_berth(val):
+            if pd.isna(val) or str(val).strip() == "":
+                return "N.D."
+            try:
+                # Tenta di convertire float in int (es 1.0 -> 1)
+                return str(int(float(val)))
+            except:
+                return str(val)
+
+        berth_values = raw_df[b_col].apply(format_berth).tolist()
+        # Creiamo la lista: SIOT (1), SIOT (2)...
+        terminal_labels = [f"SIOT ({b})" for b in berth_values]
+    else:
+        # Se non esiste la colonna Berth
+        terminal_labels = ["SIOT (N.D.)"] * len(vessels)
+
+    # --- GESTIONE DATE ---
     current_year = get_ora_trieste().year
     def parse_tasco_date(val):
         val = str(val).strip()
@@ -242,7 +285,9 @@ def process_tasco_raw(raw_df):
         etds = [pd.NaT] * len(vessels)
 
     data_dict = {'Vessel': vessels, 'ETA': etas, 'ETD': etds}
-    return build_clean_df(data_dict, 'SIOT (Petroli)')
+    
+    # Passiamo la lista dinamica dei terminal invece della stringa fissa
+    return build_clean_df(data_dict, terminal_labels)
 
 # --- AGGIORNAMENTO ---
 def aggiorna_dati():
@@ -337,7 +382,8 @@ def style_manovre(row):
     return styles
 
 # --- INTERFACCIA ---
-st.title("⚓ Monitor Manovre Porto di Trieste ⚓")
+# TITOLO AGGIORNATO CON ANCORA E NAVE
+st.title("⚓ Monitor Manovre Porto di Trieste 🚢")
 
 with st.sidebar:
     st.header("🔧 Simulazione (Fuso Trieste)")
