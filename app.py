@@ -20,7 +20,6 @@ TZ_TRIESTE = pytz.timezone('Europe/Rome')
 
 # --- SISTEMA DI SICUREZZA (LOGIN) ---
 def check_password():
-    """Ritorna True se l'utente ha inserito la password corretta."""
     if st.session_state.get("password_correct", False):
         return True
 
@@ -295,32 +294,67 @@ def aggiorna_dati():
             
         status.update(label="Scaricamento Completato!", state="complete", expanded=False)
 
-# --- LOGICA TURNI ---
-def get_orari_turno(ora_riferimento, tipo_visualizzazione):
-    if ora_riferimento.tzinfo is not None:
-        ora_riferimento = ora_riferimento.replace(tzinfo=None)
-        
+# --- NUOVA LOGICA TURNI (Senza Sidebar) ---
+
+def calcola_turno_attuale(ora_riferimento):
+    """
+    Calcola inizio e fine del turno in corso basandosi sull'ora reale.
+    Restituisce: start, end, label
+    """
     t_mattina_start = ora_riferimento.replace(hour=8, minute=0, second=0, microsecond=0)
     t_sera_start = ora_riferimento.replace(hour=20, minute=0, second=0, microsecond=0)
     
     if 8 <= ora_riferimento.hour < 20:
-        attuale_start, attuale_end = t_mattina_start, t_sera_start
-        prossimo_start, prossimo_end = t_sera_start, t_sera_start + timedelta(hours=12)
-        nome_attuale = "Diurno (08-20)"
+        # È Mattina (08-20 di oggi)
+        start = t_mattina_start
+        end = t_sera_start
+        label = f"Diurno (08-20) del {start.strftime('%d/%m/%Y')}"
     else:
+        # È Notte
         if ora_riferimento.hour >= 20:
-            attuale_start = t_sera_start
-            attuale_end = t_sera_start + timedelta(hours=12)
+            # È la notte di oggi (es. 21:00)
+            start = t_sera_start
+            end = t_sera_start + timedelta(hours=12)
         else:
-            attuale_start = t_sera_start - timedelta(days=1)
-            attuale_end = t_mattina_start
-        prossimo_start, prossimo_end = attuale_end, attuale_end + timedelta(hours=12)
-        nome_attuale = "Notturno (20-08)"
+            # È la notte di ieri (es. 02:00 del mattino, turno iniziato ieri alle 20)
+            start = t_sera_start - timedelta(days=1)
+            end = t_mattina_start
+        
+        label = f"Notturno (20-08) del {start.strftime('%d/%m/%Y')}"
+    
+    return start, end, label
 
-    if tipo_visualizzazione == "Turno Attuale":
-        return attuale_start, attuale_end, nome_attuale
-    else:
-        return prossimo_start, prossimo_end, "Prossimo Turno"
+def genera_opzioni_future(ora_riferimento):
+    """
+    Genera le opzioni per il menu a tendina dei prossimi turni (3 giorni).
+    Restituisce un dizionario {Etichetta: (start, end)}
+    """
+    opzioni = {}
+    
+    # Calcoliamo la fine del turno attuale per sapere da dove partire
+    _, fine_turno_attuale, _ = calcola_turno_attuale(ora_riferimento)
+    
+    cursore = fine_turno_attuale
+    
+    # Generiamo i prossimi 6 turni (3 giorni)
+    for _ in range(6):
+        start = cursore
+        end = cursore + timedelta(hours=12)
+        
+        # Definiamo l'etichetta
+        if start.hour == 8:
+            tipo = "08-20" # Diurno
+            data_str = start.strftime('%d/%m/%Y')
+        else: # start.hour == 20
+            tipo = "20-08" # Notturno
+            data_str = start.strftime('%d/%m/%Y')
+            
+        label = f"{tipo} del {data_str}"
+        opzioni[label] = (start, end)
+        
+        cursore = end
+        
+    return opzioni
 
 # --- STILE E COLORI ---
 def style_manovre(row):
@@ -362,55 +396,65 @@ def style_manovre(row):
 
 # --- INTERFACCIA ---
 st.title("⚓ Monitor Manovre Porto di Trieste 🚢")
-# Sottotitolo richiesto
 st.markdown("I dati vengono prelevati dai siti web TMT e Tasco pertanto includono solo movimenti container e petroliere.")
 
-with st.sidebar:
-    st.header("🔧 Simulazione (Fuso Trieste)")
-    # Rimosso input orario, mostra solo orario attuale (non modificabile)
-    ora_corrente_ts = get_ora_trieste()
-    st.write(f"🕒 Ora attuale: **{ora_corrente_ts.strftime('%H:%M')}**")
-    
-    # Selettore Data (modificabile)
-    data_simulata = st.date_input("Data", ora_corrente_ts.date())
-    
-    # Combina data scelta + ora reale corrente
-    dt_rif = datetime.combine(data_simulata, ora_corrente_ts.time())
+# Rimossa Sidebar completamente
 
-col_btn, col_info, col_sel = st.columns([1, 2, 2])
+# Layout controlli in alto
+col_btn, col_sel_mode, col_sel_drop = st.columns([1, 1, 2])
 
 with col_btn:
     if st.button("🔄 AGGIORNA SCARICANDO I DATI", type="primary"):
         aggiorna_dati()
 
+# Caricamento iniziale automatico
 if st.session_state.dati_totali.empty and st.session_state.ultimo_aggiornamento is None:
     aggiorna_dati()
 
-with col_sel:
-    # Opzioni del radio button con maiuscole/minuscole coerenti
-    scelta_vista = st.radio("Filtra per:", ["Turno attuale", "Prossimo turno"], horizontal=True)
+# Gestione Selezione Turni
+ora_reale = get_ora_trieste()
 
-start, end, nome_turno = get_orari_turno(dt_rif, scelta_vista)
+with col_sel_mode:
+    # Radio Button per scegliere la modalità
+    modo_selezione = st.radio("Seleziona vista:", ["Turno attuale", "Turno futuro"], horizontal=True)
 
-with col_info:
-    # Costruzione stringa Banner personalizzata
-    # Esempio: "Turno attuale - Notturno (20-08) del 07/02/2026"
-    data_turno_str = start.strftime('%d/%m/%Y')
-    banner_text = f"**{scelta_vista} - {nome_turno} del {data_turno_str}**"
+# Variabili finali per il filtro
+start_filter = None
+end_filter = None
+banner_text = ""
+
+if modo_selezione == "Turno attuale":
+    # Calcolo automatico
+    start_filter, end_filter, label_turno = calcola_turno_attuale(ora_reale)
+    # Banner: [Turno attuale] [diurno/notturno...]
+    banner_text = f"**[Turno attuale] {label_turno}**"
     
-    st.info(f"{banner_text}")
+else:
+    # Modo "Turno futuro"
+    opzioni_future = genera_opzioni_future(ora_reale)
     
-    if st.session_state.ultimo_aggiornamento:
-        st.caption(f"Ultimo scaricamento: {st.session_state.ultimo_aggiornamento}")
+    with col_sel_drop:
+        # Menu a tendina
+        scelta_futura = st.selectbox("Seleziona turno futuro:", list(opzioni_future.keys()))
+    
+    if scelta_futura:
+        start_filter, end_filter = opzioni_future[scelta_futura]
+        banner_text = f"**[Turno futuro] {scelta_futura}**"
+
+# --- BANNER INFORMATIVO ---
+st.info(banner_text)
+if st.session_state.ultimo_aggiornamento:
+    st.caption(f"Ultimo scaricamento: {st.session_state.ultimo_aggiornamento} (Ora Locale)")
 
 st.divider()
 
-# --- VISUALIZZAZIONE ---
+# --- VISUALIZZAZIONE E FILTRO DATI ---
 df_total = st.session_state.dati_totali
 
-if not df_total.empty:
+if not df_total.empty and start_filter and end_filter:
     if 'ETA' in df_total.columns and 'ETD' in df_total.columns:
-        mask = ((df_total['ETA'] >= start) & (df_total['ETA'] <= end)) | ((df_total['ETD'] >= start) & (df_total['ETD'] <= end))
+        mask = ((df_total['ETA'] >= start_filter) & (df_total['ETA'] <= end_filter)) | \
+               ((df_total['ETD'] >= start_filter) & (df_total['ETD'] <= end_filter))
         df_filtrato = df_total[mask].copy()
     else:
         df_filtrato = pd.DataFrame()
@@ -421,11 +465,11 @@ if not df_total.empty:
             azioni = []
             orari_rilevanti = []
             
-            if pd.notnull(row['ETA']) and start <= row['ETA'] <= end: 
+            if pd.notnull(row['ETA']) and start_filter <= row['ETA'] <= end_filter: 
                 azioni.append("ARRIVO")
                 orari_rilevanti.append(row['ETA'])
                 
-            if pd.notnull(row['ETD']) and start <= row['ETD'] <= end: 
+            if pd.notnull(row['ETD']) and start_filter <= row['ETD'] <= end_filter: 
                 azioni.append("PARTENZA")
                 orari_rilevanti.append(row['ETD'])
             
@@ -459,7 +503,7 @@ if not df_total.empty:
         )
         
     else:
-        st.info("Nessuna manovra prevista nel turno.")
+        st.info("Nessuna manovra prevista nel turno selezionato.")
 
     st.write("---")
     
