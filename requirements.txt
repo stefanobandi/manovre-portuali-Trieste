@@ -6,3 +6,4 @@ lxml
 html5lib
 openpyxl
 pytz
+requests
