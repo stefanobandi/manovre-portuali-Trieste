@@ -5,7 +5,8 @@ import os
 import glob
 import time as time_module
 import pytz 
-import requests # NUOVO IMPORT PER IL METEO
+import requests
+import streamlit.components.v1 as components # NUOVO IMPORT PER LA MAPPA
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -336,15 +337,10 @@ def genera_opzioni_future(ora_riferimento):
         cursore = end
     return opzioni
 
-# --- FUNZIONE METEO (Open-Meteo) ---
+# --- FUNZIONE METEO ---
 def get_meteo_turno(start_dt, end_dt):
-    """
-    Scarica il meteo per Trieste e restituisce i dati aggregati SOLO per il turno specificato.
-    """
     lat = 45.649  # Trieste
     lon = 13.778
-    
-    # URL API (Open-Meteo Free)
     url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,precipitation_probability,weathercode,windspeed_10m,windgusts_10m&timezone=auto"
     
     try:
@@ -354,12 +350,9 @@ def get_meteo_turno(start_dt, end_dt):
         if 'hourly' not in data:
             return None
 
-        # Convertiamo i dati in DataFrame per filtrare facilmente
         df_meteo = pd.DataFrame(data['hourly'])
         df_meteo['time'] = pd.to_datetime(df_meteo['time'])
         
-        # Filtriamo per l'orario del turno (start_dt -> end_dt)
-        # Assicuriamoci che i timezone combacino (rimuoviamo tzinfo per confronto grezzo)
         start_naive = start_dt.replace(tzinfo=None)
         end_naive = end_dt.replace(tzinfo=None)
         
@@ -369,23 +362,13 @@ def get_meteo_turno(start_dt, end_dt):
         if df_turno.empty:
             return None
             
-        # Calcolo aggregati
         t_min = df_turno['temperature_2m'].min()
         t_max = df_turno['temperature_2m'].max()
-        
-        # Vento: da km/h a Nodi (1 km/h = 0.539957 knots)
-        wind_max_kmh = df_turno['windspeed_10m'].max()
-        gust_max_kmh = df_turno['windgusts_10m'].max()
-        wind_max_kt = round(wind_max_kmh * 0.539957, 1)
-        gust_max_kt = round(gust_max_kmh * 0.539957, 1)
-        
-        # Codice Meteo (Prendiamo il più frequente o il peggiore?)
-        # Prendiamo il max (che di solito indica pioggia/temporale rispetto al sereno 0)
+        wind_max_kt = round(df_turno['windspeed_10m'].max() * 0.539957, 1)
+        gust_max_kt = round(df_turno['windgusts_10m'].max() * 0.539957, 1)
         code = df_turno['weathercode'].max()
         
-        # Mappa icone base WMO
-        icon = "☁️"
-        desc = "Variabile"
+        icon, desc = "☁️", "Variabile"
         if code == 0: icon, desc = "☀️", "Sereno"
         elif code in [1, 2, 3]: icon, desc = "⛅", "Nuvoloso"
         elif code in [45, 48]: icon, desc = "🌫️", "Nebbia"
@@ -400,7 +383,6 @@ def get_meteo_turno(start_dt, end_dt):
         }
         
     except Exception as e:
-        print(f"Errore Meteo: {e}")
         return None
 
 # --- STILE E COLORI ---
@@ -479,11 +461,10 @@ else:
 # --- BANNER INFORMATIVO ---
 st.info(banner_text)
 
-# --- BLOCCO METEO (NUOVO) ---
+# --- BLOCCO METEO ---
 if start_filter and end_filter:
     meteo = get_meteo_turno(start_filter, end_filter)
     if meteo:
-        # Colonne per i widget metrici
         m1, m2, m3 = st.columns(3)
         m1.metric("🌡️ Temperatura (Min/Max)", meteo["temp"])
         m2.metric("💨 Vento Max (Nodi)", meteo["vento"])
@@ -551,6 +532,17 @@ if not df_total.empty and start_filter and end_filter:
     else:
         st.info("Nessuna manovra prevista nel turno selezionato.")
 
+    st.write("---")
+    
+    # --- MAPPA TRAFFICO IN TEMPO REALE (NUOVA SEZIONE) ---
+    with st.expander("🗺️ Mappa Traffico Navale in Tempo Reale (Trieste)", expanded=False):
+        # Embed di VesselFinder centrato su Trieste (Lat 45.65, Lon 13.77)
+        components.iframe(
+            "https://www.vesselfinder.com/aismap?zoom=13&lat=45.650&lon=13.770&width=100%&height=500&names=true&arrows=true",
+            height=500,
+            scrolling=False
+        )
+    
     st.write("---")
     
     c1, c2 = st.columns(2)
