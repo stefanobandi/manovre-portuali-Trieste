@@ -6,7 +6,7 @@ import glob
 import time as time_module
 import pytz 
 import requests
-import streamlit.components.v1 as components # NUOVO IMPORT PER LA MAPPA
+import streamlit.components.v1 as components # IMPORT FONDAMENTALE
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -534,13 +534,17 @@ if not df_total.empty and start_filter and end_filter:
 
     st.write("---")
     
-    # --- MAPPA TRAFFICO IN TEMPO REALE (NUOVA SEZIONE) ---
+    # --- MAPPA TRAFFICO IN TEMPO REALE (MODIFICATA CON JAVASCRIPT) ---
     with st.expander("🗺️ Mappa Traffico Navale in Tempo Reale (Trieste)", expanded=False):
-        # Embed di VesselFinder centrato su Trieste (Lat 45.65, Lon 13.77)
-        components.iframe(
-            "https://www.vesselfinder.com/aismap?zoom=13&lat=45.650&lon=13.770&width=100%&height=500&names=true&arrows=true",
-            height=500,
-            scrolling=False
+        # Embed Ufficiale VesselFinder tramite HTML/JS
+        components.html(
+            """
+            <script type="text/javascript">
+                width='100%'; height='500'; border='0'; shownames='true'; latitude='45.65'; longitude='13.77'; zoom='12'; maptype='1'; trackvessel='0'; fleet='';
+            </script>
+            <script type="text/javascript" src="https://www.vesselfinder.com/aismap.js"></script>
+            """,
+            height=500
         )
     
     st.write("---")
