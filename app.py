@@ -6,7 +6,7 @@ import glob
 import time as time_module
 import pytz 
 import requests
-import streamlit.components.v1 as components # IMPORT FONDAMENTALE
+import streamlit.components.v1 as components
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -534,9 +534,10 @@ if not df_total.empty and start_filter and end_filter:
 
     st.write("---")
     
-    # --- MAPPA TRAFFICO IN TEMPO REALE (MODIFICATA CON JAVASCRIPT) ---
-    with st.expander("🗺️ Mappa Traffico Navale in Tempo Reale (Trieste)", expanded=False):
-        # Embed Ufficiale VesselFinder tramite HTML/JS
+    # --- MAPPE INTERATTIVE ---
+    
+    # 1. VesselFinder
+    with st.expander("🗺️ Mappa Traffico Navale (VesselFinder)", expanded=False):
         components.html(
             """
             <script type="text/javascript">
@@ -547,6 +548,14 @@ if not df_total.empty and start_filter and end_filter:
             height=500
         )
     
+    # 2. Windy (Vento e Meteo)
+    with st.expander("🌬️ Mappa Vento & Meteo (Windy)", expanded=False):
+        # Embed Windy con overlay Vento e unità in Nodi (kt)
+        components.iframe(
+            "https://embed.windy.com/embed2.html?lat=45.650&lon=13.770&detailLat=45.650&detailLon=13.770&width=650&height=450&zoom=11&level=surface&overlay=wind&product=ecmwf&menu=&message=&marker=&calendar=now&pressure=&type=map&location=coordinates&detail=&metricWind=kt&metricTemp=%C2%B0C&radarRange=-1",
+            height=500
+        )
+
     st.write("---")
     
     c1, c2 = st.columns(2)
