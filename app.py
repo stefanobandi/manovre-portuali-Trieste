@@ -5,6 +5,7 @@ import os
 import glob
 import time as time_module
 import pytz 
+import requests # NUOVO IMPORT PER IL METEO
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -294,29 +295,20 @@ def aggiorna_dati():
             
         status.update(label="Scaricamento Completato!", state="complete", expanded=False)
 
-# --- NUOVA LOGICA TURNI (Senza Sidebar) ---
-
+# --- NUOVA LOGICA TURNI ---
 def calcola_turno_attuale(ora_riferimento):
-    """
-    Calcola inizio e fine del turno in corso basandosi sull'ora reale.
-    Restituisce: start, end, label
-    """
     t_mattina_start = ora_riferimento.replace(hour=8, minute=0, second=0, microsecond=0)
     t_sera_start = ora_riferimento.replace(hour=20, minute=0, second=0, microsecond=0)
     
     if 8 <= ora_riferimento.hour < 20:
-        # È Mattina (08-20 di oggi)
         start = t_mattina_start
         end = t_sera_start
         label = f"Diurno (08-20) del {start.strftime('%d/%m/%Y')}"
     else:
-        # È Notte
         if ora_riferimento.hour >= 20:
-            # È la notte di oggi (es. 21:00)
             start = t_sera_start
             end = t_sera_start + timedelta(hours=12)
         else:
-            # È la notte di ieri (es. 02:00 del mattino, turno iniziato ieri alle 20)
             start = t_sera_start - timedelta(days=1)
             end = t_mattina_start
         
@@ -325,23 +317,13 @@ def calcola_turno_attuale(ora_riferimento):
     return start, end, label
 
 def genera_opzioni_future(ora_riferimento):
-    """
-    Genera le opzioni per il menu a tendina dei prossimi turni (3 giorni).
-    Restituisce un dizionario {Etichetta: (start, end)}
-    """
     opzioni = {}
-    
-    # Calcoliamo la fine del turno attuale per sapere da dove partire
     _, fine_turno_attuale, _ = calcola_turno_attuale(ora_riferimento)
-    
     cursore = fine_turno_attuale
     
-    # Generiamo i prossimi 6 turni (3 giorni)
     for _ in range(6):
         start = cursore
         end = cursore + timedelta(hours=12)
-        
-        # Definiamo l'etichetta
         if start.hour == 8:
             tipo = "Diurno (08-20)" 
             data_str = start.strftime('%d/%m/%Y')
@@ -351,10 +333,75 @@ def genera_opzioni_future(ora_riferimento):
             
         label = f"{tipo} del {data_str}"
         opzioni[label] = (start, end)
-        
         cursore = end
-        
     return opzioni
+
+# --- FUNZIONE METEO (Open-Meteo) ---
+def get_meteo_turno(start_dt, end_dt):
+    """
+    Scarica il meteo per Trieste e restituisce i dati aggregati SOLO per il turno specificato.
+    """
+    lat = 45.649  # Trieste
+    lon = 13.778
+    
+    # URL API (Open-Meteo Free)
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,precipitation_probability,weathercode,windspeed_10m,windgusts_10m&timezone=auto"
+    
+    try:
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        
+        if 'hourly' not in data:
+            return None
+
+        # Convertiamo i dati in DataFrame per filtrare facilmente
+        df_meteo = pd.DataFrame(data['hourly'])
+        df_meteo['time'] = pd.to_datetime(df_meteo['time'])
+        
+        # Filtriamo per l'orario del turno (start_dt -> end_dt)
+        # Assicuriamoci che i timezone combacino (rimuoviamo tzinfo per confronto grezzo)
+        start_naive = start_dt.replace(tzinfo=None)
+        end_naive = end_dt.replace(tzinfo=None)
+        
+        mask = (df_meteo['time'] >= start_naive) & (df_meteo['time'] <= end_naive)
+        df_turno = df_meteo[mask]
+        
+        if df_turno.empty:
+            return None
+            
+        # Calcolo aggregati
+        t_min = df_turno['temperature_2m'].min()
+        t_max = df_turno['temperature_2m'].max()
+        
+        # Vento: da km/h a Nodi (1 km/h = 0.539957 knots)
+        wind_max_kmh = df_turno['windspeed_10m'].max()
+        gust_max_kmh = df_turno['windgusts_10m'].max()
+        wind_max_kt = round(wind_max_kmh * 0.539957, 1)
+        gust_max_kt = round(gust_max_kmh * 0.539957, 1)
+        
+        # Codice Meteo (Prendiamo il più frequente o il peggiore?)
+        # Prendiamo il max (che di solito indica pioggia/temporale rispetto al sereno 0)
+        code = df_turno['weathercode'].max()
+        
+        # Mappa icone base WMO
+        icon = "☁️"
+        desc = "Variabile"
+        if code == 0: icon, desc = "☀️", "Sereno"
+        elif code in [1, 2, 3]: icon, desc = "⛅", "Nuvoloso"
+        elif code in [45, 48]: icon, desc = "🌫️", "Nebbia"
+        elif code in [51, 53, 55, 61, 63, 65]: icon, desc = "🌧️", "Pioggia"
+        elif code in [71, 73, 75, 77]: icon, desc = "❄️", "Neve"
+        elif code >= 95: icon, desc = "⛈️", "Temporale"
+        
+        return {
+            "temp": f"{t_min:.0f}° / {t_max:.0f}°",
+            "vento": f"{wind_max_kt} kt (Raff: {gust_max_kt})",
+            "meteo": f"{icon} {desc}"
+        }
+        
+    except Exception as e:
+        print(f"Errore Meteo: {e}")
+        return None
 
 # --- STILE E COLORI ---
 def style_manovre(row):
@@ -412,35 +459,36 @@ if st.session_state.dati_totali.empty and st.session_state.ultimo_aggiornamento 
 ora_reale = get_ora_trieste()
 
 with col_sel_mode:
-    # Radio Button per scegliere la modalità
     modo_selezione = st.radio("Seleziona vista:", ["Turno attuale", "Turno futuro"], horizontal=True)
 
-# Variabili finali per il filtro
 start_filter = None
 end_filter = None
 banner_text = ""
 
 if modo_selezione == "Turno attuale":
-    # Calcolo automatico
     start_filter, end_filter, label_turno = calcola_turno_attuale(ora_reale)
-    # Banner SENZA parentesi quadre
     banner_text = f"**Turno attuale - {label_turno}**"
-    
 else:
-    # Modo "Turno futuro"
     opzioni_future = genera_opzioni_future(ora_reale)
-    
     with col_sel_drop:
-        # Menu a tendina
         scelta_futura = st.selectbox("Seleziona turno futuro:", list(opzioni_future.keys()))
-    
     if scelta_futura:
         start_filter, end_filter = opzioni_future[scelta_futura]
-        # Banner SENZA parentesi quadre
         banner_text = f"**Turno futuro - {scelta_futura}**"
 
 # --- BANNER INFORMATIVO ---
 st.info(banner_text)
+
+# --- BLOCCO METEO (NUOVO) ---
+if start_filter and end_filter:
+    meteo = get_meteo_turno(start_filter, end_filter)
+    if meteo:
+        # Colonne per i widget metrici
+        m1, m2, m3 = st.columns(3)
+        m1.metric("🌡️ Temperatura (Min/Max)", meteo["temp"])
+        m2.metric("💨 Vento Max (Nodi)", meteo["vento"])
+        m3.metric("☔ Previsione", meteo["meteo"])
+
 if st.session_state.ultimo_aggiornamento:
     st.caption(f"Ultimo scaricamento: {st.session_state.ultimo_aggiornamento} (Ora Locale)")
 
