@@ -66,6 +66,8 @@ def get_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     
     download_dir = os.getcwd()
     prefs = {
@@ -100,33 +102,58 @@ def build_clean_df(source_data, terminal_input):
 
 # --- 1. SCRAPING TMT ---
 def fetch_tmt_data(driver):
-    url = "https://www.trieste-marine-terminal.com/it"
-    try:
-        driver.get(url)
-        time_module.sleep(2)
-        dfs = pd.read_html(driver.page_source, match="Vessel", flavor='html5lib')
-        if len(dfs) > 0:
-            raw_df = dfs[0]
-            raw_df.columns = [str(c).strip() for c in raw_df.columns]
-            
-            vessels = raw_df['Vessel'].tolist() if 'Vessel' in raw_df.columns else []
-            
-            if 'ETB' in raw_df.columns:
-                etas = pd.to_datetime(raw_df['ETB'], dayfirst=True, errors='coerce').tolist()
-            else:
-                etas = [pd.NaT] * len(vessels)
-                
-            if 'ETD' in raw_df.columns:
-                etds = pd.to_datetime(raw_df['ETD'], dayfirst=True, errors='coerce').tolist()
-            else:
-                etds = [pd.NaT] * len(vessels)
-            
-            data_dict = {'Vessel': vessels, 'ETA': etas, 'ETD': etds}
-            return build_clean_df(data_dict, 'TMT (Molo VII)')
-            
-    except Exception as e:
-        print(f"Errore TMT: {e}")
+    url = "https://www.trieste-marine-terminal.com/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "it-IT,it;q=0.9,en;q=0.8"
+    }
+    html_content = None
     
+    # Tentativo rapido e pulito via HTTP con headers reali
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code == 200 and "Vessel" in resp.text:
+            html_content = resp.text
+    except Exception as e:
+        print(f"Tentativo requests TMT: {e}")
+
+    # Fallback su Selenium se la richiesta diretta non restituisce la tabella
+    if not html_content and driver:
+        try:
+            driver.get(url)
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Vessel')]"))
+            )
+            time_module.sleep(1)
+            html_content = driver.page_source
+        except Exception as e:
+            print(f"Tentativo Selenium TMT: {e}")
+
+    if html_content:
+        try:
+            dfs = pd.read_html(html_content, match="Vessel", flavor='html5lib')
+            if len(dfs) > 0:
+                raw_df = dfs[0]
+                raw_df.columns = [str(c).strip() for c in raw_df.columns]
+                
+                vessels = raw_df['Vessel'].tolist() if 'Vessel' in raw_df.columns else []
+                
+                if 'ETB' in raw_df.columns:
+                    etas = pd.to_datetime(raw_df['ETB'], dayfirst=True, errors='coerce').tolist()
+                else:
+                    etas = [pd.NaT] * len(vessels)
+                    
+                if 'ETD' in raw_df.columns:
+                    etds = pd.to_datetime(raw_df['ETD'], dayfirst=True, errors='coerce').tolist()
+                else:
+                    etds = [pd.NaT] * len(vessels)
+                
+                data_dict = {'Vessel': vessels, 'ETA': etas, 'ETD': etds}
+                return build_clean_df(data_dict, 'TMT (Molo VII)')
+        except Exception as e:
+            print(f"Errore parsing TMT: {e}")
+            
     return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 
 # --- 2. SCRAPING TASCO ---
@@ -162,18 +189,15 @@ def fetch_tasco_data(driver, status_container=None):
         time_module.sleep(4)
         log("✅ Login effettuato")
 
-        # NAVIGAZIONE
-        log("🧭 Navigazione menu TIMOS...")
+        # NAVIGAZIONE DIRETTA ALLA TABELLA
+        log("🧭 Apertura diretta Terminal Basic Blackboard...")
         try:
-            btn_timos = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Access to TIMOS')]")))
-            btn_timos.click()
-            time_module.sleep(3)
-            btn_bb = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Terminal Basic Blackboard')]")))
-            btn_bb.click()
-            time_module.sleep(5)
+            driver.get("https://tasco.tal-oil.com/ui/menuitem-2003")
+            wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Export')]")))
+            time_module.sleep(2)
             log("✅ Tabella raggiunta")
         except:
-            log("❌ Errore navigazione menu")
+            log("❌ Errore caricamento tabella")
             return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 
         # EXPORT
@@ -183,8 +207,8 @@ def fetch_tasco_data(driver, status_container=None):
             except: pass
 
         try:
-            btn_export = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Export')]")))
-            btn_export.click()
+            btn_export = wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Export')]")))
+            driver.execute_script("arguments[0].click();", btn_export)
         except:
             log("❌ Tasto Export non trovato")
             return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
@@ -550,7 +574,6 @@ if not df_total.empty and start_filter and end_filter:
     
     # 2. Windy (Vento e Meteo)
     with st.expander("🌬️ Mappa Vento & Meteo (Windy)", expanded=False):
-        # Embed Windy con overlay Vento e unità in Nodi (kt)
         components.iframe(
             "https://embed.windy.com/embed2.html?lat=45.650&lon=13.770&detailLat=45.650&detailLon=13.770&width=650&height=450&zoom=11&level=surface&overlay=wind&product=ecmwf&menu=&message=&marker=&calendar=now&pressure=&type=map&location=coordinates&detail=&metricWind=kt&metricTemp=%C2%B0C&radarRange=-1",
             height=500
