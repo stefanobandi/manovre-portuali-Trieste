@@ -6,7 +6,7 @@ import glob
 import time as time_module
 import pytz 
 import requests
-import io  # FONDAMENTALE per correggere il bug di read_html
+import io
 import streamlit.components.v1 as components
 
 from selenium import webdriver
@@ -59,7 +59,7 @@ if 'ultimo_aggiornamento' not in st.session_state:
 if 'debug_msg_tasco' not in st.session_state:
     st.session_state.debug_msg_tasco = ""
 
-# --- BROWSER ---
+# --- BROWSER OTTIMIZZATO ---
 def get_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless")
@@ -70,12 +70,17 @@ def get_driver():
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     
+    # Ottimizzazioni velocità
+    chrome_options.page_load_strategy = 'eager'
+    chrome_options.add_argument("--blink-settings=imagesEnabled=false")
+    
     download_dir = os.getcwd()
     prefs = {
         "download.default_directory": download_dir,
         "download.prompt_for_download": False,
         "download.directory_upgrade": True,
-        "safebrowsing.enabled": True
+        "safebrowsing.enabled": True,
+        "profile.managed_default_content_settings.images": 2
     }
     chrome_options.add_experimental_option("prefs", prefs)
     
@@ -110,23 +115,20 @@ def fetch_tmt_data(driver, status_container=None):
     url = "https://www.trieste-marine-terminal.com/"
     html_content = None
     
-    # Prelievo pagina via Selenium
     if driver:
-        log("🧭 TMT: Apertura pagina con browser...")
+        log("🧭 TMT: Apertura pagina rapida...")
         try:
             driver.get(url)
-            WebDriverWait(driver, 10).until(
+            WebDriverWait(driver, 8).until(
                 EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Vessel')]"))
             )
-            time_module.sleep(1)
             html_content = driver.page_source
-            log("✅ TMT: Tabella individuata nel portale.")
+            log("✅ TMT: Tabella individuata.")
         except Exception as e:
-            log(f"⚠️ TMT: Errore caricamento Selenium: {str(e)}")
+            log(f"⚠️ TMT: Errore caricamento: {str(e)}")
 
     if html_content:
         try:
-            # Uso di io.StringIO per evitare l'errore [Errno 2] No such file or directory
             dfs = pd.read_html(io.StringIO(html_content), match="Vessel", flavor='html5lib')
             if len(dfs) > 0:
                 raw_df = dfs[0]
@@ -168,7 +170,7 @@ def fetch_tasco_data(driver, status_container=None):
     login_url = "https://tasco.tal-oil.com/ui/login"
     
     try:
-        wait = WebDriverWait(driver, 20)
+        wait = WebDriverWait(driver, 15)
         
         # LOGIN
         log("🔑 Accesso SIOT in corso...")
@@ -184,7 +186,13 @@ def fetch_tasco_data(driver, status_container=None):
         pass_input.clear()
         pass_input.send_keys(st.secrets["tasco"]["password"])
         pass_input.send_keys(Keys.RETURN)
-        time_module.sleep(4)
+        
+        # Attesa dinamica del cambio pagina/autenticazione
+        try:
+            wait.until(lambda d: "login" not in d.current_url.lower())
+        except:
+            time_module.sleep(1.5)
+            
         log("✅ Login effettuato")
 
         # NAVIGAZIONE DIRETTA ALLA TABELLA
@@ -192,7 +200,6 @@ def fetch_tasco_data(driver, status_container=None):
         try:
             driver.get("https://tasco.tal-oil.com/ui/menuitem-2003")
             wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Export')]")))
-            time_module.sleep(2)
             log("✅ Tabella raggiunta")
         except:
             log("❌ Errore caricamento tabella")
@@ -211,14 +218,15 @@ def fetch_tasco_data(driver, status_container=None):
             log("❌ Tasto Export non trovato")
             return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
             
-        # DOWNLOAD
+        # DOWNLOAD DINAMICO (controllo ogni 0.3s)
         file_scaricato = None
-        for i in range(15):
+        for _ in range(35):
             files = glob.glob("*.xls*")
             if files:
-                file_scaricato = files[0]
-                break
-            time_module.sleep(1)
+                if not any(f.endswith('.crdownload') for f in files):
+                    file_scaricato = files[0]
+                    break
+            time_module.sleep(0.3)
             
         if not file_scaricato:
             log("❌ Timeout download")
