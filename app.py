@@ -6,6 +6,7 @@ import glob
 import time as time_module
 import pytz 
 import requests
+import io  # FONDAMENTALE per correggere il bug di read_html
 import streamlit.components.v1 as components
 
 from selenium import webdriver
@@ -107,56 +108,29 @@ def fetch_tmt_data(driver, status_container=None):
             status_container.write(msg)
 
     url = "https://www.trieste-marine-terminal.com/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-    }
     html_content = None
     
-    # Tentativo diretto via requests
-    log("🌐 TMT: Tentativo scaricamento diretto via HTTP...")
-    try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        log(f"ℹ️ TMT (requests): Risposta HTTP {resp.status_code} (lunghezza: {len(resp.text)} byte)")
-        if resp.status_code == 200:
-            if "Vessel" in resp.text:
-                html_content = resp.text
-                log("✅ TMT (requests): Parola 'Vessel' trovata nell'HTML.")
-            else:
-                log("⚠️ TMT (requests): HTTP 200 ma testo 'Vessel' non presente nella pagina.")
-        else:
-            log(f"⚠️ TMT (requests): Errore server HTTP {resp.status_code}")
-    except Exception as e:
-        log(f"⚠️ TMT (requests) fallito: {str(e)}")
-
-    # Fallback su Selenium se requests non trova la tabella
-    if not html_content and driver:
-        log("🧭 TMT: Avvio fallback tramite browser Selenium...")
+    # Prelievo pagina via Selenium
+    if driver:
+        log("🧭 TMT: Apertura pagina con browser...")
         try:
             driver.get(url)
-            log(f"ℹ️ TMT (Selenium): Pagina aperta, titolo: '{driver.title}'")
-            WebDriverWait(driver, 8).until(
+            WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Vessel')]"))
             )
             time_module.sleep(1)
             html_content = driver.page_source
-            log("✅ TMT (Selenium): Elemento 'Vessel' individuato nel DOM.")
+            log("✅ TMT: Tabella individuata nel portale.")
         except Exception as e:
-            log(f"⚠️ TMT (Selenium): Ricerca elemento fallita: {str(e)}")
-            try:
-                log(f"ℹ️ TMT (Selenium): Titolo corrente: '{driver.title}' - Lunghezza sorgente: {len(driver.page_source)} byte")
-            except:
-                pass
+            log(f"⚠️ TMT: Errore caricamento Selenium: {str(e)}")
 
     if html_content:
         try:
-            dfs = pd.read_html(html_content, match="Vessel", flavor='html5lib')
-            log(f"📊 TMT: Tabelle individuate con 'Vessel': {len(dfs)}")
+            # Uso di io.StringIO per evitare l'errore [Errno 2] No such file or directory
+            dfs = pd.read_html(io.StringIO(html_content), match="Vessel", flavor='html5lib')
             if len(dfs) > 0:
                 raw_df = dfs[0]
                 raw_df.columns = [str(c).strip() for c in raw_df.columns]
-                log(f"📋 TMT: Colonne tabella: {list(raw_df.columns)}")
                 
                 vessels = raw_df['Vessel'].tolist() if 'Vessel' in raw_df.columns else []
                 
@@ -172,12 +146,12 @@ def fetch_tmt_data(driver, status_container=None):
                 
                 data_dict = {'Vessel': vessels, 'ETA': etas, 'ETD': etds}
                 df_clean = build_clean_df(data_dict, 'TMT (Molo VII)')
-                log(f"✅ TMT: Estratte regolarmente {len(df_clean)} righe.")
+                log(f"✅ TMT completato ({len(df_clean)} navi trovate)")
                 return df_clean
         except Exception as e:
-            log(f"❌ TMT: Errore parsing DataFrame: {str(e)}")
+            log(f"❌ TMT: Errore parsing dati: {str(e)}")
             
-    log("❌ TMT: Nessun dato utilizzabile estratto.")
+    log("❌ TMT: Nessun dato estratto.")
     return pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
 
 # --- 2. SCRAPING TASCO ---
@@ -326,7 +300,6 @@ def aggiorna_dati():
         
         st.write("🛳️ Lettura dati TMT...")
         df_tmt = fetch_tmt_data(driver, status_container=status)
-        st.write(f"📊 Riepilogo TMT: {len(df_tmt)} navi caricate")
         
         df_tasco = fetch_tasco_data(driver, status_container=status)
         
@@ -342,7 +315,7 @@ def aggiorna_dati():
         else:
             st.session_state.dati_totali = pd.DataFrame(columns=['Terminal', 'Vessel', 'ETA', 'ETD'])
             
-        status.update(label="Scaricamento Completato!", state="complete", expanded=True)
+        status.update(label="Scaricamento Completato!", state="complete", expanded=False)
 
 # --- NUOVA LOGICA TURNI ---
 def calcola_turno_attuale(ora_riferimento):
